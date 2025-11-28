@@ -1,0 +1,26 @@
+{
+  "name": "inplainsight",
+  "version": "1.0.0",
+  "description": "Post-quantum steganographic file encryption service",
+  "main": "server/server.js",
+  "scripts": {
+    "start": "node server/server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@noble/post-quantum": "^0.5.2",
+    "adm-zip": "^0.5.16",
+    "archiver": "^7.0.1",
+    "better-sqlite3": "^12.4.6",
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "multer": "^2.0.2",
+    "node-schedule": "^2.1.1",
+    "sharp": "^0.34.5",
+    "uuid": "^13.0.0"
+  }
+}

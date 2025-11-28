@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>InPlainSight - Steganographic File Encryption</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>InPlainSight</h1>
+            <p class="subtitle">Post-Quantum Steganographic File Encryption</p>
+            <p class="warning">⚠️ All files are automatically deleted after 1 hour</p>
+        </header>
+
+        <div class="tabs">
+            <button class="tab-button active" data-tab="encode">Encode File</button>
+            <button class="tab-button" data-tab="decode">Decode File</button>
+        </div>
+
+        <!-- ENCODE TAB -->
+        <div id="encode-tab" class="tab-content active">
+            <div class="upload-section">
+                <div class="upload-box" id="encode-upload-box">
+                    <input type="file" id="encode-file-input" accept="*/*" hidden>
+                    <div class="upload-prompt">
+                        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="17 8 12 3 7 8"></polyline>
+                            <line x1="12" y1="3" x2="12" y2="15"></line>
+                        </svg>
+                        <p>Drop file here or click to upload</p>
+                        <p class="file-limit">Maximum file size: 10GB</p>
+                    </div>
+                </div>
+                <p class="selected-file" id="encode-selected-file"></p>
+            </div>
+
+            <div class="progress-section" id="encode-progress-section" style="display: none;">
+                <div class="progress-bar">
+                    <div class="progress-fill" id="encode-progress-fill"></div>
+                </div>
+                <p class="progress-text" id="encode-progress-text">Preparing...</p>
+            </div>
+
+            <div class="results-section" id="encode-results-section" style="display: none;">
+                <div class="download-buttons">
+                    <button class="btn btn-primary" id="download-zip-btn">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="7 10 12 15 17 10"></polyline>
+                            <line x1="12" y1="15" x2="12" y2="3"></line>
+                        </svg>
+                        Download ZIP Bundle
+                    </button>
+                    <button class="btn btn-secondary" id="start-new-btn">Process New File</button>
+                </div>
+
+                <div class="png-gallery" id="png-gallery">
+                    <h3>Generated Images (<span id="png-count">0</span>)</h3>
+                    <div class="gallery-grid" id="gallery-grid"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- DECODE TAB -->
+        <div id="decode-tab" class="tab-content">
+            <div class="upload-section">
+                <div class="upload-box" id="decode-upload-box">
+                    <input type="file" id="decode-file-input" accept=".png,.zip" multiple hidden>
+                    <div class="upload-prompt">
+                        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="17 8 12 3 7 8"></polyline>
+                            <line x1="12" y1="3" x2="12" y2="15"></line>
+                        </svg>
+                        <p>Drop PNG files or ZIP here</p>
+                        <p class="file-limit">Upload individual PNGs or a ZIP bundle</p>
+                    </div>
+                </div>
+                <p class="selected-file" id="decode-selected-file"></p>
+            </div>
+
+            <div class="progress-section" id="decode-progress-section" style="display: none;">
+                <div class="progress-bar">
+                    <div class="progress-fill" id="decode-progress-fill"></div>
+                </div>
+                <p class="progress-text" id="decode-progress-text">Preparing...</p>
+            </div>
+
+            <div class="results-section" id="decode-results-section" style="display: none;">
+                <div class="download-buttons">
+                    <button class="btn btn-primary" id="download-original-btn">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="7 10 12 15 17 10"></polyline>
+                            <line x1="12" y1="15" x2="12" y2="3"></line>
+                        </svg>
+                        Download Original File
+                    </button>
+                    <button class="btn btn-secondary" id="decode-new-btn">Decode New File</button>
+                </div>
+                <p class="original-filename" id="original-filename"></p>
+            </div>
+
+            <div class="error-section" id="decode-error-section" style="display: none;">
+                <div class="error-box">
+                    <h3>⚠️ Incomplete Upload</h3>
+                    <p id="error-message"></p>
+                    <button class="btn btn-secondary" id="retry-decode-btn">Try Again</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app-v2.js?v=4"></script>
+</body>
+</html>
