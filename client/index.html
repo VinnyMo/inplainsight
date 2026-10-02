@@ -3,171 +3,113 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>InPlainSight - Steganographic File Encryption</title>
-    <link rel="stylesheet" href="styles.css?v=13">
+    <meta name="referrer" content="no-referrer">
+    <title>InPlainSight — Hide & recover files</title>
+    <link rel="stylesheet" href="styles.css?v=15">
+    <script src="crypto-utils.js?v=13" defer></script>
+    <script src="app-v2.js?v=15" defer></script>
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>InPlainSight</h1>
-            <p class="subtitle">Post-Quantum Steganographic File Encryption</p>
-            <p class="warning">⚠️ All files are automatically deleted from the server after 1 hour</p>
+    <a class="skip-link" href="#workspace">Skip to file tools</a>
+    <div class="shell">
+        <header class="masthead">
+            <a class="brand" href="./" aria-label="InPlainSight home"><span class="brand-mark" aria-hidden="true">[ iP ]</span> InPlainSight<span class="cursor" aria-hidden="true">_</span></a>
+            <span class="system-label"><span aria-hidden="true">●</span> TEMPORARY FILE SHARING</span>
         </header>
-
-        <!-- Debug Console -->
-        <div id="debug-console" class="debug-console">
-            <div class="debug-header">
-                <strong>Debug Log</strong>
-                <button id="clear-debug" class="debug-clear">Clear</button>
-            </div>
-            <div id="debug-output" class="debug-output"></div>
-        </div>
-
-        <div class="tabs">
-            <button class="tab-button active" data-tab="encode">Encode File</button>
-            <button class="tab-button" data-tab="decode">Decode File</button>
-        </div>
-
-        <!-- ENCODE TAB -->
-        <div id="encode-tab" class="tab-content active">
-            <div class="settings-section">
-                <label for="png-size-slider" class="settings-label">
-                    Target PNG Size: <span id="png-size-value">10</span> MB
-                </label>
-                <div class="slider-container">
-                    <div class="slider-track-bg"></div>
-                    <input type="range" id="png-size-slider" min="3" max="20" value="10" step="1">
-                </div>
-                <p class="settings-hint">Larger PNGs = fewer files to download</p>
-
-                <div class="password-section">
-                    <label for="encode-password" class="settings-label">
-                        🔒 Password Protection (Optional)
-                    </label>
-                    <input type="password" id="encode-password" class="password-input" placeholder="Leave empty for no password">
-                    <p class="settings-hint">You may add a password to further protect PNGs in case they are intercepted. REMINDER: All files are are automatically deleted from server after 1 hour and will be unrecoverable even with a password.</p>
-                </div>
-            </div>
-
-            <div class="upload-section">
-                <div class="upload-box" id="encode-upload-box">
-                    <input type="file" id="encode-file-input" hidden>
-                    <div class="upload-prompt">
-                        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                            <polyline points="17 8 12 3 7 8"></polyline>
-                            <line x1="12" y1="3" x2="12" y2="15"></line>
-                        </svg>
-                        <p>Drop file here or click to upload</p>
-                        <p class="file-limit">Maximum file size: 10GB</p>
+        <main>
+            <section class="intro" aria-labelledby="page-title">
+                <p class="eyebrow">A FILE. A SET OF IMAGES. A LITTLE LESS OBVIOUS.</p>
+                <h1 id="page-title">Hidden in plain sight.</h1>
+                <p>Turn a file into encrypted PNG images. Bring them back here to recover it.</p>
+            </section>
+            <div class="workspace-layout">
+                <section class="workspace" id="workspace" aria-label="File tools" tabindex="-1">
+                    <div class="task-tabs" role="tablist" aria-label="What would you like to do?">
+                        <button id="hide-tab" type="button" role="tab" aria-selected="true" aria-controls="encode-panel" data-mode="encode"><span aria-hidden="true">01 / </span>Hide a file</button>
+                        <button id="recover-tab" type="button" role="tab" aria-selected="false" aria-controls="decode-panel" data-mode="decode" tabindex="-1"><span aria-hidden="true">02 / </span>Recover a file</button>
                     </div>
-                </div>
-                <p class="selected-file" id="encode-selected-file"></p>
+                    <section id="encode-panel" role="tabpanel" aria-labelledby="hide-tab">
+                        <ol class="steps" aria-label="Hide file steps"><li data-step="choose" aria-current="step">1. Choose</li><li data-step="review">2. Review</li><li data-step="result">3. Download</li></ol>
+                        <form id="encode-form" novalidate>
+                            <div id="encode-choose" class="view">
+                                <p class="eyebrow">FILE → PNG IMAGES</p>
+                                <h2>What would you like to hide?</h2>
+                                <p class="muted">Choose one file. You'll review the options before anything uploads.</p>
+                                <div class="drop-zone" id="encode-drop-zone">
+                                    <span class="file-icon" aria-hidden="true">[ + ]</span>
+                                    <label class="button primary file-picker" for="encode-file-input">Choose a file<input id="encode-file-input" type="file" aria-describedby="encode-file-help"></label>
+                                    <p>or drag and drop it here</p>
+                                    <p class="small muted" id="encode-file-help">Any file type · Up to 10 GB · Not empty</p>
+                                </div>
+                                <button id="encode-keep" class="text-button" type="button" hidden>Keep this file & return to review →</button>
+                            </div>
+                            <div id="encode-review" class="view" hidden>
+                                <p class="eyebrow">READY TO HIDE</p><h2>One quick check.</h2>
+                                <div class="file-summary"><span aria-hidden="true">[ FILE ]</span><div><strong id="encode-selection"></strong><span class="muted small" id="encode-size"></span></div><button id="encode-back" class="text-button" type="button">Change</button></div>
+                                <label for="encode-password">Add a password <span class="optional">optional</span></label>
+                                <div class="password-row"><input id="encode-password" type="password" autocomplete="new-password" aria-describedby="encode-password-help" placeholder="Leave blank for no password"><button type="button" class="button compact" data-reveal="encode-password" aria-pressed="false">Show</button></div>
+                                <p id="encode-password-help" class="small muted">Without one, anyone with the complete image set can recover your file while it's available. If you add one, keep it safe and share it separately.</p>
+                                <details class="options"><summary>Image size <span class="muted">10 MB per PNG by default</span></summary><label for="png-size-slider">Target size: <output id="png-size-value" for="png-size-slider">10</output> MB</label><input id="png-size-slider" type="range" min="3" max="20" value="10" step="1"><p class="small muted">Larger PNGs mean fewer images. The result is always available as one ZIP bundle.</p></details>
+                                <div class="notice"><strong>Recover within about 1 hour.</strong><p>Your file is uploaded and processed on this server. Saved PNGs still need its record and key to work. Keep your original.</p></div>
+                                <button id="encode-start" class="button primary wide" type="submit">Hide file & create PNGs <span aria-hidden="true">→</span></button>
+                            </div>
+                        </form>
+                        <div id="encode-error" class="error-box" role="alert" hidden></div>
+                        <div id="encode-progress" class="view" hidden>
+                            <p class="eyebrow">WORK IN PROGRESS</p><h2>Making your images.</h2>
+                            <p id="encode-status" class="status" role="status" aria-live="polite">Preparing your file…</p>
+                            <progress id="encode-progress-bar" max="100" aria-label="Hide file progress"></progress>
+                            <p class="small muted" id="encode-progress-help">Keep this tab open until the upload finishes. Large files can take several minutes.</p>
+                            <button id="encode-retry" class="button" type="button" hidden>Check status again</button>
+                        </div>
+                        <div id="encode-result" class="view" hidden>
+                            <p class="eyebrow success">READY TO DOWNLOAD</p><h2>Your PNGs are ready.</h2>
+                            <p id="encode-result-summary"></p>
+                            <a id="download-zip" class="button primary wide" download>Download ZIP bundle <span aria-hidden="true">↓</span></a>
+                            <p class="small muted">Recommended: one download with every PNG you'll need.</p>
+                            <div class="notice"><strong id="encode-deadline">Recover within about 1 hour of creating this file.</strong><p>Downloading doesn't extend the deadline. Keep all images unchanged: don't resize, edit or re-save them. Send them as files, not compressed photos.</p></div>
+                            <details id="png-details" class="options"><summary>Download individual PNGs <span id="png-count" class="muted"></span></summary><div id="png-gallery" class="png-grid"></div><button id="more-pngs" class="button" type="button" hidden>Show more images</button></details>
+                            <button type="button" class="text-button" id="go-recover">Have the images? Recover a file →</button>
+                        </div>
+                        <details id="encode-return" class="return-link" hidden><summary>Return to this job</summary><p class="small muted">Keep this link private: it gives access to the result. It lasts only while this server keeps the job and may stop working after a restart.</p><label class="sr-only" for="return-url">Private return link</label><div class="link-row"><input id="return-url" type="text" readonly><button id="copy-link" class="button compact" type="button">Copy link</button></div><p id="copy-status" class="small" role="status"></p></details>
+                        <div class="reset-row" id="encode-reset-row" hidden><button id="encode-reset" class="text-button" type="button">Start over</button><span class="small muted">Clears this screen; it doesn't delete server files.</span></div>
+                    </section>
+                    <section id="decode-panel" role="tabpanel" aria-labelledby="recover-tab" hidden>
+                        <ol class="steps" aria-label="Recover file steps"><li data-step="choose" aria-current="step">1. Choose</li><li data-step="review">2. Recover</li><li data-step="result">3. Download</li></ol>
+                        <form id="decode-form" novalidate>
+                            <div id="decode-choose" class="view">
+                                <p class="eyebrow">PNG IMAGES → ORIGINAL FILE</p><h2>Bring back the whole set.</h2>
+                                <p class="muted">Choose the ZIP bundle, or select all PNGs from one file together.</p>
+                                <div class="drop-zone" id="decode-drop-zone"><span class="file-icon" aria-hidden="true">[ ↩ ]</span><label class="button primary file-picker" for="decode-file-input">Choose ZIP or PNGs<input id="decode-file-input" type="file" accept=".png,.zip" multiple aria-describedby="decode-file-help"></label><p>or drag and drop them here</p><p class="small muted" id="decode-file-help">One ZIP or a complete PNG set · Up to 10 GB per file</p></div>
+                                <button id="decode-keep" class="text-button" type="button" hidden>Keep this selection & return to review →</button>
+                                <p class="small muted">Use the original downloads. Edited images, missing parts or expired server records can't be recovered.</p>
+                            </div>
+                            <div id="decode-review" class="view" hidden>
+                                <p class="eyebrow">READY TO RECOVER</p><h2>Let's put it back together.</h2>
+                                <div class="file-summary"><span aria-hidden="true">[ SET ]</span><div><strong id="decode-selection"></strong><span class="muted small" id="decode-size"></span></div><button id="decode-back" class="text-button" type="button">Change</button></div>
+                                <p id="decode-file-list" class="small muted file-list"></p>
+                                <p>We'll upload and check your images, then ask for a password if one is needed.</p>
+                                <div class="notice"><strong>Recovery depends on this server.</strong><p>The original file's server record must still be available. Files expire after about 1 hour, even if you saved the images.</p></div>
+                                <button id="decode-start" class="button primary wide" type="submit">Recover file <span aria-hidden="true">→</span></button>
+                            </div>
+                        </form>
+                        <div id="decode-error" class="error-box" role="alert" hidden></div>
+                        <div id="decode-progress" class="view" hidden><p class="eyebrow">WORK IN PROGRESS</p><h2>Recovering your file.</h2><p id="decode-status" class="status" role="status" aria-live="polite">Checking your images…</p><progress id="decode-progress-bar" max="100" aria-label="Recover file progress"></progress><p class="small muted">Large files can take several minutes. Keep this tab open while the images upload.</p><button id="decode-retry" class="button" type="button" hidden>Check status again</button></div>
+                        <div id="password-panel" class="view" hidden><p class="eyebrow">ONE MORE STEP</p><h2 id="password-heading" tabindex="-1">This file needs a password.</h2><p>Your image set is selected. Enter the password used when it was created.</p><form id="password-form"><label for="decode-password">File password</label><div class="password-row"><input id="decode-password" type="password" autocomplete="off" required aria-describedby="password-help"><button type="button" class="button compact" data-reveal="decode-password" aria-pressed="false">Show</button></div><p id="password-help" class="small muted">Your browser derives a key from the password and sends that key to the server. The images will be uploaded again to recover the file.</p><p id="password-error" class="error-box" role="alert" hidden></p><div class="button-row"><button id="password-submit" type="submit" class="button primary">Unlock & recover</button><button id="password-back" type="button" class="button">Back</button></div></form></div>
+                        <div id="decode-result" class="view" hidden><p class="eyebrow success">RECOVERY COMPLETE</p><h2>Your file is ready.</h2><p id="original-filename" class="result-filename"></p><a id="download-original" class="button primary wide" download>Download recovered file <span aria-hidden="true">↓</span></a><p class="small muted">Save it now. The download is temporary and doesn't extend the original file's expiry.</p></div>
+                        <div class="reset-row" id="decode-reset-row" hidden><button id="decode-reset" class="text-button" type="button">Start over</button><span class="small muted">Clears this screen; it doesn't delete server files.</span></div>
+                    </section>
+                </section>
+                <aside class="guide" aria-label="How InPlainSight works">
+                    <div class="guide-heading"><span aria-hidden="true">[ ? ]</span><h2>A quick field guide</h2></div>
+                    <ol class="guide-steps"><li><span>01</span><div><strong>Hide</strong><p>Turn any file into a set of encrypted PNG images.</p></div></li><li><span>02</span><div><strong>Keep the whole set</strong><p>Download the ZIP. Share the images as files, unchanged.</p></div></li><li><span>03</span><div><strong>Recover in time</strong><p>Upload the ZIP or all PNGs here before the file expires.</p></div></li></ol>
+                    <div class="expiry-note"><span class="eyebrow">SHORT-LIVED BY DESIGN</span><p>About <strong>1 hour.</strong><br>Keep your original.</p><p class="small">Saved images aren't a backup. Recovery needs this server's record and key.</p></div>
+                    <details class="trust-details"><summary>What happens to my file?</summary><p>Your file is uploaded and processed on the server, which stores the keys needed for recovery.</p><p>An optional password adds protection. Your browser derives a key and sends that key to the server; the password itself isn't sent.</p><p>Expiry cleanup runs on a schedule, so deletion isn't exact to the minute. Downloading images or adding a password doesn't extend recovery time.</p><p>This is not offline storage or end-to-end encryption.</p></details>
+                </aside>
             </div>
-
-            <div class="link-section" id="encode-link-section" style="display: none;">
-                <h3>Processing Your File</h3>
-                <p>Your file is being encrypted. Save this link to check back within 1 hour:</p>
-                <div class="link-box">
-                    <input type="text" id="shareable-link" readonly>
-                    <button class="btn btn-primary" id="copy-link-btn">Copy Link</button>
-                </div>
-                <p class="link-hint">Processing may take several minutes for large files. You can close this page and return using the link above.</p>
-            </div>
-
-            <div class="progress-section" id="encode-progress-section" style="display: none;">
-                <div class="progress-bar">
-                    <div class="progress-fill" id="encode-progress-fill"></div>
-                </div>
-                <p class="progress-text" id="encode-progress-text">Preparing...</p>
-            </div>
-
-            <div class="results-section" id="encode-results-section" style="display: none;">
-                <div class="download-buttons">
-                    <button class="btn btn-primary" id="download-zip-btn">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                            <polyline points="7 10 12 15 17 10"></polyline>
-                            <line x1="12" y1="15" x2="12" y2="3"></line>
-                        </svg>
-                        Download ZIP Bundle
-                    </button>
-                    <button class="btn btn-secondary" id="start-new-btn">Process New File</button>
-                </div>
-
-                <div class="png-gallery" id="png-gallery">
-                    <h3>Generated Images (<span id="png-count">0</span>)</h3>
-                    <div class="gallery-grid" id="gallery-grid"></div>
-                </div>
-            </div>
-        </div>
-
-        <!-- DECODE TAB -->
-        <div id="decode-tab" class="tab-content">
-            <div class="upload-section">
-                <div class="upload-box" id="decode-upload-box">
-                    <input type="file" id="decode-file-input" accept=".png,.zip" multiple hidden>
-                    <div class="upload-prompt">
-                        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                            <polyline points="17 8 12 3 7 8"></polyline>
-                            <line x1="12" y1="3" x2="12" y2="15"></line>
-                        </svg>
-                        <p>Drop PNG files or ZIP here</p>
-                        <p class="file-limit">Upload individual PNGs or a ZIP bundle</p>
-                    </div>
-                </div>
-                <p class="selected-file" id="decode-selected-file"></p>
-            </div>
-
-            <div class="progress-section" id="decode-progress-section" style="display: none;">
-                <div class="progress-bar">
-                    <div class="progress-fill" id="decode-progress-fill"></div>
-                </div>
-                <p class="progress-text" id="decode-progress-text">Preparing...</p>
-            </div>
-
-            <div class="results-section" id="decode-results-section" style="display: none;">
-                <div class="download-buttons">
-                    <button class="btn btn-primary" id="download-original-btn">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                            <polyline points="7 10 12 15 17 10"></polyline>
-                            <line x1="12" y1="15" x2="12" y2="3"></line>
-                        </svg>
-                        Download Original File
-                    </button>
-                    <button class="btn btn-secondary" id="decode-new-btn">Decode New File</button>
-                </div>
-                <p class="original-filename" id="original-filename"></p>
-            </div>
-
-            <div class="error-section" id="decode-error-section" style="display: none;">
-                <div class="error-box">
-                    <h3>⚠️ Incomplete Upload</h3>
-                    <p id="error-message"></p>
-                    <button class="btn btn-secondary" id="retry-decode-btn">Try Again</button>
-                </div>
-            </div>
-        </div>
-
-        <!-- Password Modal for Decode -->
-        <div id="password-modal" class="password-modal" style="display: none;">
-            <div class="password-modal-content">
-                <h2>🔒 Password Required</h2>
-                <p>These PNGs are password-protected. Please enter the password to decrypt:</p>
-                <input type="password" id="decode-password" class="password-input" placeholder="Enter password" autofocus>
-                <div class="password-modal-buttons">
-                    <button class="btn btn-primary" id="password-submit-btn">Decrypt</button>
-                    <button class="btn btn-secondary" id="password-cancel-btn">Cancel</button>
-                </div>
-                <p class="password-modal-hint">Your password stays in your browser. A derived encryption key is sent securely to the server to decrypt your file.</p>
-            </div>
-        </div>
+        </main>
+        <footer><span>InPlainSight / FILES WITH A DIFFERENT FACE</span><details class="diagnostics"><summary>Technical details</summary><p>PNG encoding · ML-KEM + AES-GCM · Server-assisted recovery</p><div id="diagnostic-log" class="diagnostic-log" aria-label="Activity log"></div><button id="clear-diagnostics" type="button" class="text-button">Clear activity</button></details></footer>
     </div>
-
-    <script src="crypto-utils.js?v=13"></script>
-    <script src="app-v2.js?v=14"></script>
+    <noscript><p class="notice">JavaScript is needed to hide or recover a file. Enable it in your browser, then reload this page.</p></noscript>
 </body>
 </html>
-
