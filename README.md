@@ -1,40 +1,80 @@
 # InPlainSight
 
-Post-quantum steganographic file encryption service that converts files into encrypted PNG images.
+A server-assisted experiment that turns a file into encrypted PNG images, then reconstructs the file from the complete image set.
 
-## Features
+[Try InPlainSight](https://vincentmossman.com/inplainsight/)
 
-- **Post-Quantum Encryption**: Uses ML-KEM (Kyber) for quantum-resistant security
-- **Steganographic Encoding**: Embeds encrypted data into PNG images
-- **Large File Support**: Handles files up to 10GB
-- **Automatic Cleanup**: Files automatically deleted after 1 hour
-- **User-Friendly Interface**: Drag-and-drop upload with real-time progress tracking
-- **Flexible Download**: Download as ZIP bundle or individual PNGs
+**Keep your original file.** Recovery needs both the PNGs and this server's retained file record and key material. Files are scheduled to expire after about an hour; downloading the images does not create an independent, long-term backup.
 
-## How It Works
+## Try the workflow
 
-1. **Hide a file**: Choose a file → Review optional password and image size → Create PNGs → Download the complete ZIP bundle
-2. **Recover a file**: Choose the ZIP or all PNGs → Recover (enter a password if needed) → Download the original file
+1. **Hide a file:** choose a file, review the optional password and image size, create the PNGs, and download the complete ZIP bundle
+2. **Recover a file:** choose that ZIP or every PNG in the set, enter the password if needed, and download the reconstructed file
 
-Files expire after about one hour. Recovery requires this server’s retained file record and key, even after you download the images. Keep the original file. See [the guided workflow notes](docs/ux-overhaul.md) for behavior, privacy wording and verification.
+Use a small, non-sensitive test file first. The guided interface includes progress, retry and recovery states. Intermittent mobile Chrome file-picker behavior is tracked in [issue #3](https://github.com/VinnyMo/inplainsight/issues/3).
 
-## Installation
+## Security and limits
 
-```bash
-cd /home/maestro/inplainsight
-npm install
-```
+- **Server-assisted processing:** the original file is uploaded to the server, which performs encryption and recovery. This is not end-to-end encryption.
+- **Password protection:** the browser derives a key locally and sends that derived key to the server. The derived key is sensitive; use HTTPS outside local development. New password-protected records store a wrapped secret key.
+- **Cryptography:** ML-KEM-768 establishes shared secrets and AES-256-GCM encrypts chunks. Using these primitives does not establish that the whole application is secure, audited, or “quantum-proof.”
+- **PNG encoding:** encrypted bytes are represented as greyscale pixel values. Keep the PNGs unchanged; resizing, recompressing, or converting them can destroy recovery data.
+- **Expiry:** the application assigns one-hour expiry times and schedules cleanup every 15 minutes, plus a startup pass. This is not a guarantee of exact deletion time or erasure from backups, logs, and historical key storage.
+- **Size:** the upload middleware permits up to 10 GiB per file, but processing reads whole files into memory and creates additional buffers and images. That ceiling is not a tested large-file capacity guarantee.
+- **Legacy format:** chunk headers are not fully bound into cryptographic authentication. The [security review](docs/security-update.md) documents remaining ordering, identity, historical-key, and recovery limitations.
 
-## Development
+This is an experimental project, not a place to entrust irreplaceable files or sensitive material. Read the security review before deploying, upgrading a database, or attempting historical recovery.
 
-Run the server manually:
+## Run locally
 
-```bash
+Use a current Node.js/npm installation compatible with the locked native dependencies (`better-sqlite3` and `sharp`). A native build toolchain may be needed if prebuilt packages are unavailable.
+
+```sh
+git clone https://github.com/VinnyMo/inplainsight.git
+cd inplainsight
+npm ci
+mkdir -p temp/uploads temp/processed temp/downloads
 npm start
-# Server runs on http://localhost:3008
 ```
 
-## Production Deployment
+Open [http://localhost:3008](http://localhost:3008). The server binds to the loopback interface. SQLite state is created locally, and startup applies additive schema upgrades and starts expiry cleanup.
+
+**Use a fresh checkout and synthetic data.** Do not start this service against the only copy of an old database or preserved recovery evidence.
+
+## Tests and documentation
+
+```sh
+npm test
+```
+
+The security/HTTP regression suite uses synthetic data in an isolated copy and needs local port 3008 free. Frontend state checks use a DOM model. The optional Playwright suite can report a skip when browser tooling is unavailable; a skip does not verify native file pickers, rendering, or downloads.
+
+- [Testing guide](docs/testing.md): test commands, prerequisites, and verification limits
+- [Security and compatibility review](docs/security-update.md): password enforcement, historical recovery, format caveats, and rollout safeguards
+- [Guided workflow notes](docs/ux-overhaul.md): frontend behavior and review checklist
+
+## Project layout
+
+```text
+client/index.html          Guided interface
+client/app-v2.js           Served frontend workflow
+client/crypto-utils.js     Browser-side password derivation
+server/server.js           Express routes and download handling
+server/encryption.js       ML-KEM-768 and AES-256-GCM
+server/fileProcessor.js    File/chunk orchestration
+server/pngEncoder.js       PNG encoding and decoding
+server/keyProtection.js    Stored-key protection checks
+server/cleanup.js          Scheduled expiry cleanup
+database/                 SQLite schema and additive migrations
+test/                     Security and interface regressions
+temp/                     Runtime uploads, PNGs, ZIPs, and recovered files
+```
+
+## Deployment reference
+
+The service file and nginx example below describe the existing deployment layout. Review paths, service user, permissions, storage, proxy limits, and TLS for your own host; they are not a general production-hardening recipe. The proxy's upload ceiling does not remove the application's memory limits. Follow the [rollout safeguards](docs/security-update.md#separately-approved-rollout-checklist) before changing a running instance.
+
+### systemd example
 
 1. Copy the systemd service file:
 ```bash
@@ -58,14 +98,14 @@ sudo systemctl status inplainsight.service
 journalctl -u inplainsight.service -f
 ```
 
-## Nginx Configuration
+### nginx example
 
 Add to `/etc/nginx/sites-enabled/vincentmossman.com`:
 
 ```nginx
 # InPlainSight - proxy to port 3008 with path rewriting
 location /inplainsight/ {
-    client_max_body_size 10G;  # Support up to 10GB uploads
+    client_max_body_size 10G;  # Proxy ceiling only; not a tested processing guarantee
     proxy_pass http://localhost:3008/;
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
@@ -93,78 +133,13 @@ sudo nginx -t
 sudo systemctl restart nginx
 ```
 
-## Access
-
-- **Production**: https://vincentmossman.com/inplainsight/
-- **Local Dev**: http://localhost:3008
-
-## Security update and regression tests
-
-Read [the compatibility and rollout review](docs/security-update.md) before any deployment or database upgrade. It explains historical-file recovery caveats and evidence preservation. Run `npm ci` and `npm test` in an isolated checkout; the HTTP regression test needs local port 3008 free. Tests use synthetic data only.
-
-## Security
-
-- Encryption keys stored server-side only (never exposed to users)
-- Keys stored in SQLite database with file-level permissions
-- The service schedules expiry cleanup; key retention and historical backups should be verified separately
-- Post-quantum encryption protects against future quantum computers
-
-## Technical Details
-
-### Encryption Stack
-- **Key Encapsulation**: ML-KEM-768 (NIST standardized Kyber)
-- **Symmetric Encryption**: AES-256-GCM
-- **Data Encoding**: Binary → Greyscale PNG pixels
-
-### PNG Structure
-- First 32 pixels: Metadata (magic number, file ID, chunk index, total count)
-- Remaining pixels: Encrypted data (one byte per greyscale pixel value)
-- Final pixel: Transparent (prevents compression)
-
-### Database Schema
-- `files`: File metadata and expiration timestamps
-- `encryption_keys`: Kyber public/secret key pairs
-- `download_tokens`: Temporary download URLs (1-hour expiration)
-
-## Project Structure
-
-```
-inplainsight/
-├── server/
-│   ├── server.js           # Express server and API routes
-│   ├── encryption.js       # Kyber encryption/decryption
-│   ├── pngEncoder.js       # PNG encoding/decoding
-│   ├── fileProcessor.js    # File processing orchestration
-│   └── cleanup.js          # Scheduled cleanup tasks
-├── client/
-│   ├── index.html          # Frontend UI
-│   ├── styles.css          # Styling
-│   └── app-v2.js           # Served frontend logic
-├── database/
-│   ├── schema.sql          # Database schema
-│   ├── db.js               # Database initialization
-│   └── inplainsight.db     # SQLite database (created at runtime)
-└── temp/
-    ├── uploads/            # Temporary uploaded files
-    ├── processed/          # Generated PNGs
-    └── downloads/          # ZIP bundles and reconstructed files
-```
 
 ## Troubleshooting
 
-### Server won't start
-- Check port 3008 is available: `lsof -i :3008`
-- Check logs: `journalctl -u inplainsight.service -n 50`
-
-### Upload fails
-- Verify nginx `client_max_body_size` is set to 10G
-- Check disk space: `df -h`
-
-### Files not being cleaned up
-- Check cleanup scheduler logs in service journal
-- Manually trigger cleanup: restart the service
+- **Server won't start:** check that port 3008 is free and the runtime directories are writable
+- **Upload fails:** check available disk/RAM, native dependencies, and both application and proxy limits
+- **Cleanup or recovery differs from expectations:** review service logs and the security guide; preserve relevant evidence before restarting, because startup schedules cleanup
 
 ## License
 
-ISC
-
+The package declares an ISC license.
