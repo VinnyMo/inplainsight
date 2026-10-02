@@ -136,8 +136,13 @@ async function encodeToPNG(data, metadata) {
 async function decodeFromPNG(pngBuffer) {
     // Extract raw pixel data
     const { data: pixelData, info } = await sharp(pngBuffer)
+        .ensureAlpha()
         .raw()
         .toBuffer({ resolveWithObject: true });
+
+    if (info.channels !== 4 || pixelData.length < METADATA_PIXELS * 4) {
+        throw new Error('Invalid PNG: Incomplete metadata');
+    }
 
     // Extract metadata from first 32 pixels
     const metadataBuffer = Buffer.alloc(METADATA_PIXELS);
@@ -159,6 +164,10 @@ async function decodeFromPNG(pngBuffer) {
     const totalPngs = metadataBuffer.readUInt32BE(16);
     const dataLength = metadataBuffer.readUInt32BE(20);
     const passwordProtected = metadataBuffer[24] === 1;
+
+    if (dataLength > Math.floor(pixelData.length / 4) - METADATA_PIXELS - 1) {
+        throw new Error('Invalid PNG: Truncated data');
+    }
 
     // Extract data pixels
     const data = Buffer.alloc(dataLength);
@@ -199,3 +208,4 @@ export {
     decodeFromPNG,
     hashStringTo4Bytes
 };
+

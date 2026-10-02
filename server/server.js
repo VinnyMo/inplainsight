@@ -8,11 +8,11 @@ import cors from 'cors';
 import AdmZip from 'adm-zip';
 import { fileURLToPath } from 'url';
 
-import { processFileToImages, processImagesToFile, processImagesToFileWithKey } from './fileProcessor.js';
+import { processFileToImages, processImagesToFile } from './fileProcessor.js';
 import { statements } from '../database/db.js';
 import { initCleanupScheduler } from './cleanup.js';
-import { encryptWithDerivedKey, decryptWithDerivedKey } from './serverCrypto.js';
-import { decodeFromPNG, hashStringTo4Bytes } from './pngEncoder.js';
+import { decodeBase64, requiresPassword } from './keyProtection.js';
+import { logRequest } from './requestLogging.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -45,7 +45,7 @@ const storage = multer.diskStorage({
         cb(null, path.join(__dirname, '../temp/uploads'));
     },
     filename: (req, file, cb) => {
-        cb(null, `${uuidv4()}_${file.originalname}`);
+        cb(null, uuidv4());
     }
 });
 
@@ -54,12 +54,8 @@ const upload = multer({
     limits: { fileSize: 10 * 1024 * 1024 * 1024 } // 10GB limit
 });
 
-// Log all incoming requests for debugging
-app.use((req, res, next) => {
-    const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] ${req.method} ${req.path} - Content-Length: ${req.headers['content-length'] || 'unknown'}`);
-    next();
-});
+// Request bodies and raw URLs can contain keys or bearer tokens.
+app.use(logRequest);
 
 // Store active processing sessions for progress tracking
 const processSessions = new Map();
@@ -69,16 +65,12 @@ const processSessions = new Map();
  * Upload a file and encode it into PNGs
  */
 app.post('/api/encode', (req, res, next) => {
-    console.log('=== /api/encode ENDPOINT HIT ===');
-    console.log('Content-Type:', req.headers['content-type']);
-    console.log('Content-Length:', req.headers['content-length']);
-
     // Pass to multer
     const uploadHandler = upload.single('file');
     uploadHandler(req, res, (err) => {
         if (err) {
-            console.error('MULTER ERROR:', err);
-            return res.status(500).json({ error: `Upload error: ${err.message}` });
+            console.error('Upload failed');
+            return res.status(500).json({ error: 'Upload error' });
         }
         next();
     });
@@ -96,35 +88,26 @@ app.post('/api/encode', (req, res, next) => {
     const mimeType = req.file.mimetype;
     const targetPngSizeMB = parseInt(req.body.targetPngSizeMB) || 10;
 
-    // Password protection info (sent from client after PBKDF2 derivation)
+    // Validate before accepting work. Do not log any request-controlled fields.
     let passwordProtection = null;
-    let derivedKeyBuffer = null;
-    if (req.body.passwordProtected === 'true') {
-        // Client sends: salt, iv, and the derived key itself
-        // Server will encrypt the Kyber secret key with this derived key
-        const salt = req.body.salt;
-        const iv = req.body.iv;
-        const derivedKeyBase64 = req.body.derivedKey;
-
-        // Convert base64 derived key to buffer
-        derivedKeyBuffer = Buffer.from(derivedKeyBase64, 'base64');
-
-        passwordProtection = {
-            enabled: true,
-            salt: salt,
-            iv: iv,
-            derivedKey: derivedKeyBuffer
-        };
+    try {
+        if (req.body.passwordProtected !== undefined && !['true', 'false'].includes(req.body.passwordProtected)) {
+            throw new Error('Invalid password protection data');
+        }
+        if (req.body.passwordProtected === 'true') {
+            decodeBase64(req.body.salt, 32);
+            decodeBase64(req.body.iv, 12);
+            passwordProtection = {
+                enabled: true,
+                salt: req.body.salt,
+                iv: req.body.iv,
+                derivedKey: decodeBase64(req.body.derivedKey, 32)
+            };
+        }
+    } catch {
+        await fsPromises.unlink(filePath).catch(() => {});
+        return res.status(400).json({ error: 'Invalid password protection data' });
     }
-
-    console.log('=== ENCODE REQUEST ===');
-    console.log('File received:', originalFilename);
-    console.log('File size:', req.file.size);
-    console.log('File path:', filePath);
-    console.log('Password protected:', passwordProtection ? 'YES' : 'NO');
-    console.log('req.body:', req.body);
-    console.log('targetPngSizeMB from body:', req.body.targetPngSizeMB);
-    console.log('Parsed targetPngSizeMB:', targetPngSizeMB);
 
     // Create progress tracking
     processSessions.set(sessionId, {
@@ -171,7 +154,7 @@ app.post('/api/encode', (req, res, next) => {
         // Clean up uploaded file
         await fsPromises.unlink(filePath);
     } catch (err) {
-        console.error('Error processing file:', err);
+        console.error('Error processing file');
         processSessions.set(sessionId, {
             stage: 'error',
             error: err.message
@@ -209,15 +192,13 @@ app.post('/api/decode-with-password', upload.any(), async (req, res) => {
     }
 
     const sessionId = uuidv4();
-    const derivedKeyBase64 = req.body.derivedKey;
-
-    if (!derivedKeyBase64) {
-        return res.status(400).json({ error: 'No derived key provided' });
+    let derivedKeyBuffer;
+    try {
+        derivedKeyBuffer = decodeBase64(req.body.derivedKey, 32);
+    } catch {
+        await Promise.all(req.files.map(file => fsPromises.unlink(file.path).catch(() => {})));
+        return res.status(400).json({ error: 'Invalid password protection data' });
     }
-
-    console.log('=== DECODE WITH PASSWORD REQUEST ===');
-    console.log('Files:', req.files.length);
-    console.log('Derived key provided');
 
     // Create progress tracking
     processSessions.set(sessionId, {
@@ -255,80 +236,14 @@ app.post('/api/decode-with-password', upload.any(), async (req, res) => {
             pngPaths = req.files.map(f => f.path);
         }
 
-        // Decode PNGs and get password protection info
-        const firstPng = await fsPromises.readFile(pngPaths[0]);
-        const { metadata } = await decodeFromPNG(firstPng);
-
-        if (!metadata.passwordProtected) {
-            processSessions.set(sessionId, {
-                stage: 'error',
-                error: 'These PNGs are not password protected'
-            });
-            return;
-        }
-
-        // Get file info from database to get encrypted secret key
-        const allFiles = statements.getAllFiles.all();
-        const fileInfo = allFiles.find(f => {
-            const computedHash = hashStringTo4Bytes(f.id);
-            return f.png_count === metadata.totalPngs && computedHash === metadata.fileIdHash;
-        });
-
-        if (!fileInfo) {
-            processSessions.set(sessionId, {
-                stage: 'error',
-                error: 'File not found in database'
-            });
-            return;
-        }
-
-        // Get encryption key data
-        const keyData = statements.getEncryptionKey.get(fileInfo.id);
-        if (!keyData || !keyData.encrypted_secret_key) {
-            processSessions.set(sessionId, {
-                stage: 'error',
-                error: 'Encryption key not found'
-            });
-            return;
-        }
-
-        // Decrypt the Kyber secret key using the derived key from client
-        const derivedKeyBuffer = Buffer.from(derivedKeyBase64, 'base64');
-        const saltBuffer = Buffer.from(keyData.salt, 'base64');
-        const ivBuffer = Buffer.from(keyData.iv, 'base64');
-        const encryptedSecretKeyBuffer = Buffer.from(keyData.encrypted_secret_key, 'base64');
-
-        let decryptedSecretKey;
-        try {
-            decryptedSecretKey = decryptWithDerivedKey(
-                encryptedSecretKeyBuffer,
-                derivedKeyBuffer,
-                ivBuffer
-            );
-            console.log('Kyber secret key decrypted successfully');
-        } catch (err) {
-            console.error('Failed to decrypt secret key - wrong password?', err);
-            processSessions.set(sessionId, {
-                stage: 'error',
-                error: 'Incorrect password'
-            });
-
-            // Clean up uploaded files
-            for (const pngPath of pngPaths) {
-                try {
-                    await fsPromises.unlink(pngPath);
-                } catch {}
-            }
-            return;
-        }
-
-        // Now proceed with normal decryption using the decrypted secret key
-        const result = await processImagesToFileWithKey(
+        // The shared processor resolves all chunks and authenticates the stored
+        // wrapped key using database protection state, never the PNG flag.
+        const result = await processImagesToFile(
             pngPaths,
-            decryptedSecretKey,
             (progress) => {
                 processSessions.set(sessionId, progress);
-            }
+            },
+            derivedKeyBuffer
         );
 
         if (!result.success) {
@@ -365,7 +280,7 @@ app.post('/api/decode-with-password', upload.any(), async (req, res) => {
             } catch {}
         }
     } catch (err) {
-        console.error('Error decoding files with password:', err);
+        console.error('Error decoding files with password');
         processSessions.set(sessionId, {
             stage: 'error',
             error: err.message
@@ -481,7 +396,7 @@ app.post('/api/decode', upload.any(), async (req, res) => {
             } catch {}
         }
     } catch (err) {
-        console.error('Error decoding files:', err);
+        console.error('Error decoding files');
         processSessions.set(sessionId, {
             stage: 'error',
             error: err.message
@@ -545,7 +460,7 @@ app.get('/api/download/:token', async (req, res) => {
             res.sendFile(filePath);
         }
     } catch (err) {
-        console.error('Error downloading file:', err);
+        console.error('Error downloading file');
         res.status(500).json({ error: 'Error downloading file' });
     }
 });
@@ -587,7 +502,7 @@ app.get('/api/file/:fileId', (req, res) => {
 
     // Get encryption key info to check password protection
     const keyData = statements.getEncryptionKey.get(fileId);
-    const passwordProtected = keyData && keyData.password_protected === 1;
+    const passwordProtected = keyData ? requiresPassword(keyData) : false;
 
     res.json({
         id: fileData.id,
@@ -604,6 +519,13 @@ app.get('/api/file/:fileId', (req, res) => {
     });
 });
 
+// Suppress default Express error logging: parser errors may contain body snippets.
+app.use((err, req, res, next) => {
+    console.error('Request failed');
+    if (res.headersSent) return res.end();
+    res.status(err.status === 400 ? 400 : 500).json({ error: 'Request failed' });
+});
+
 // Initialize cleanup scheduler
 initCleanupScheduler();
 
@@ -618,3 +540,4 @@ const server = app.listen(PORT, '127.0.0.1', () => {
 server.timeout = 2 * 60 * 60 * 1000; // 2 hours in milliseconds
 server.keepAliveTimeout = 65000; // Slightly higher than nginx default
 server.headersTimeout = 66000; // Should be higher than keepAliveTimeout
+

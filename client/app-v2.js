@@ -8,7 +8,11 @@ function debugLog(message, type = 'info') {
     const timestamp = new Date().toLocaleTimeString();
     const entry = document.createElement('div');
     entry.className = `debug-entry ${type}`;
-    entry.innerHTML = `<span class="debug-timestamp">[${timestamp}]</span>${message}`;
+    const time = document.createElement('span');
+    time.className = 'debug-timestamp';
+    time.textContent = `[${timestamp}]`;
+    entry.appendChild(time);
+    entry.appendChild(document.createTextNode(String(message)));
     debugOutput.appendChild(entry);
     debugOutput.scrollTop = debugOutput.scrollHeight;
 
@@ -1064,3 +1068,4 @@ window.addEventListener('DOMContentLoaded', () => {
         pollProgress(sessionId, 'encode');
     }
 });
+

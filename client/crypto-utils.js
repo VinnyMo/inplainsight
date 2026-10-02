@@ -1,6 +1,6 @@
 /**
  * Client-side cryptography utilities for password-based encryption
- * All encryption happens in the browser - passwords never sent to server
+ * Password derivation happens in the browser; derived keys are sent to the server.
  */
 
 /**
@@ -148,3 +148,4 @@ if (typeof module !== 'undefined' && module.exports) {
         base64ToArray
     };
 }
+
