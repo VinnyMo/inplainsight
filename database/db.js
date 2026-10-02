@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import fs from 'fs';
+import { initializeSchema } from './schemaMigration.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -7,7 +7,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const dbPath = path.join(__dirname, 'inplainsight.db');
-const schemaPath = path.join(__dirname, 'schema.sql');
 
 // Initialize database
 const db = new Database(dbPath);
@@ -18,9 +17,8 @@ db.pragma('journal_mode = WAL');
 // Ensure UTF-8 encoding
 db.pragma('encoding = "UTF-8"');
 
-// Read and execute schema
-const schema = fs.readFileSync(schemaPath, 'utf8');
-db.exec(schema);
+// Upgrade old schemas before preparing statements against newer columns.
+initializeSchema(db);
 
 // Prepared statements for common operations
 const statements = {
@@ -30,8 +28,8 @@ const statements = {
     `),
 
     insertEncryptionKey: db.prepare(`
-        INSERT INTO encryption_keys (file_id, public_key, secret_key, created_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO encryption_keys (file_id, public_key, secret_key, created_at, password_protected, salt, iv, encrypted_secret_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `),
 
     insertDownloadToken: db.prepare(`
@@ -58,3 +56,4 @@ export {
     db,
     statements
 };
+

@@ -96,11 +96,15 @@ sudo systemctl restart nginx
 - **Production**: https://vincentmossman.com/inplainsight/
 - **Local Dev**: http://localhost:3008
 
+## Security update and regression tests
+
+Read [the compatibility and rollout review](docs/security-update.md) before any deployment or database upgrade. It explains historical-file recovery caveats and evidence preservation. Run `npm ci` and `npm test` in an isolated checkout; the HTTP regression test needs local port 3008 free. Tests use synthetic data only.
+
 ## Security
 
 - Encryption keys stored server-side only (never exposed to users)
 - Keys stored in SQLite database with file-level permissions
-- All files and keys automatically deleted after 1 hour
+- The service schedules expiry cleanup; key retention and historical backups should be verified separately
 - Post-quantum encryption protects against future quantum computers
 
 ## Technical Details
@@ -161,3 +165,4 @@ inplainsight/
 ## License
 
 ISC
+

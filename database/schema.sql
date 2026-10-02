@@ -17,6 +17,10 @@ CREATE TABLE IF NOT EXISTS encryption_keys (
     public_key BLOB NOT NULL,
     secret_key BLOB NOT NULL,
     created_at INTEGER NOT NULL,
+    password_protected INTEGER DEFAULT 0,
+    salt TEXT,
+    iv TEXT,
+    encrypted_secret_key TEXT,
     FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
 );
 

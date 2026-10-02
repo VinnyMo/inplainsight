@@ -25,11 +25,11 @@ const MAGIC_NUMBER = Buffer.from('INPS', 'ascii');
 /**
  * Encode data and metadata into a PNG
  * @param {Buffer} data - The encrypted data to encode
- * @param {Object} metadata - { fileId, chunkIndex, totalChunks, totalPngs }
+ * @param {Object} metadata - { fileId, chunkIndex, totalChunks, totalPngs, passwordProtection }
  * @returns {Promise<Buffer>} PNG image buffer
  */
 async function encodeToPNG(data, metadata) {
-    const { fileId, chunkIndex, totalChunks, totalPngs } = metadata;
+    const { fileId, chunkIndex, totalChunks, totalPngs, passwordProtection } = metadata;
 
     // Calculate image dimensions
     // Total pixels = metadata + data + 1 transparent pixel
@@ -63,6 +63,13 @@ async function encodeToPNG(data, metadata) {
 
     // Data length
     metadataBuffer.writeUInt32BE(data.length, 20);
+
+    // Password protected flag (byte 24)
+    if (passwordProtection && passwordProtection.enabled) {
+        metadataBuffer[24] = 1;
+    } else {
+        metadataBuffer[24] = 0;
+    }
 
     // Write metadata to image
     for (let i = 0; i < METADATA_PIXELS; i++) {
@@ -129,8 +136,13 @@ async function encodeToPNG(data, metadata) {
 async function decodeFromPNG(pngBuffer) {
     // Extract raw pixel data
     const { data: pixelData, info } = await sharp(pngBuffer)
+        .ensureAlpha()
         .raw()
         .toBuffer({ resolveWithObject: true });
+
+    if (info.channels !== 4 || pixelData.length < METADATA_PIXELS * 4) {
+        throw new Error('Invalid PNG: Incomplete metadata');
+    }
 
     // Extract metadata from first 32 pixels
     const metadataBuffer = Buffer.alloc(METADATA_PIXELS);
@@ -151,6 +163,11 @@ async function decodeFromPNG(pngBuffer) {
     const totalChunks = metadataBuffer.readUInt32BE(12);
     const totalPngs = metadataBuffer.readUInt32BE(16);
     const dataLength = metadataBuffer.readUInt32BE(20);
+    const passwordProtected = metadataBuffer[24] === 1;
+
+    if (dataLength > Math.floor(pixelData.length / 4) - METADATA_PIXELS - 1) {
+        throw new Error('Invalid PNG: Truncated data');
+    }
 
     // Extract data pixels
     const data = Buffer.alloc(dataLength);
@@ -166,7 +183,8 @@ async function decodeFromPNG(pngBuffer) {
             chunkIndex,
             totalChunks,
             totalPngs,
-            dataLength
+            dataLength,
+            passwordProtected
         }
     };
 }
@@ -190,3 +208,4 @@ export {
     decodeFromPNG,
     hashStringTo4Bytes
 };
+

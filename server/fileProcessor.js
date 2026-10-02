@@ -7,6 +7,8 @@ import { splitIntoChunks, generateKeyPair, encryptChunk, decryptChunk } from './
 import { encodeToPNG, decodeFromPNG, hashStringTo4Bytes } from './pngEncoder.js';
 import { statements } from '../database/db.js';
 import { fileURLToPath } from 'url';
+import { encryptWithDerivedKey } from './serverCrypto.js';
+import { decodeBase64, requiresPassword, validateProtectionMetadata, unwrapSecretKey } from './keyProtection.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,22 +19,85 @@ const PROCESSED_DIR = path.join(TEMP_DIR, 'processed');
 const DOWNLOADS_DIR = path.join(TEMP_DIR, 'downloads');
 
 /**
+ * Calculate optimal chunk size based on target PNG size
+ * @param {number} targetPngSizeMB - Target PNG file size in MB
+ * @returns {number} Chunk size in bytes
+ */
+function calculateChunkSize(targetPngSizeMB) {
+    // PNG structure breakdown:
+    // - Each data byte becomes 1 pixel in greyscale (stored as RGBA = 4 bytes)
+    // - Metadata: 32 pixels = 128 bytes in PNG
+    // - Transparent pixel: 1 pixel = 4 bytes
+    // - PNG format overhead: ~200 bytes (headers, chunks, etc.)
+    //
+    // Encryption overhead per chunk:
+    // - Kyber ML-KEM-768 ciphertext: 1088 bytes
+    // - AES-256-GCM overhead: IV (12) + auth tag (16) = 28 bytes
+    // - Length header: 4 bytes
+    // - Total encryption overhead: 1088 + 28 + 4 = 1120 bytes
+    //
+    // Data flow:
+    // chunk (N bytes) → encrypt → combined (N + 1120) → PNG encode →
+    // pixels (32 + N + 1120 + 1) → RGBA (pixels × 4) → PNG file
+
+    const targetPngBytes = targetPngSizeMB * 1024 * 1024;
+
+    // PNG format overhead (signatures, headers, chunk metadata)
+    const pngFormatOverhead = 200;
+
+    // Available bytes for RGBA pixel data
+    const availableForPixels = targetPngBytes - pngFormatOverhead;
+
+    // Convert to number of pixels (each pixel = 4 bytes RGBA)
+    const maxPixels = Math.floor(availableForPixels / 4);
+
+    // Account for image being square (width × height ≥ needed pixels)
+    // Use ~95% to account for rounding up to square dimensions
+    const effectivePixels = Math.floor(maxPixels * 0.95);
+
+    // Subtract metadata and transparent pixel
+    const dataPixels = effectivePixels - 32 - 1;
+
+    // Subtract encryption overhead (1120 bytes = 1120 pixels in our encoding)
+    const chunkSize = dataPixels - 1120;
+
+    // Ensure reasonable bounds (0.5MB to 25MB)
+    const minChunk = 0.5 * 1024 * 1024;
+    const maxChunk = 25 * 1024 * 1024;
+
+    return Math.max(minChunk, Math.min(chunkSize, maxChunk));
+}
+
+/**
  * Process uploaded file: split, encrypt, and generate PNGs
  * @param {string} filePath - Path to uploaded file
  * @param {string} originalFilename - Original filename
  * @param {string} mimeType - MIME type
+ * @param {number} targetPngSizeMB - Target PNG file size in MB
  * @param {Function} progressCallback - Callback for progress updates
+ * @param {Object} passwordProtection - { enabled, salt, iv, derivedKey } or null
  * @returns {Promise<Object>} { fileId, pngPaths, zipPath }
  */
-async function processFileToImages(filePath, originalFilename, mimeType, progressCallback) {
+async function processFileToImages(filePath, originalFilename, mimeType, targetPngSizeMB, progressCallback, passwordProtection = null) {
+    if (passwordProtection?.enabled) {
+        decodeBase64(passwordProtection.salt, 32);
+        decodeBase64(passwordProtection.iv, 12);
+        if (!Buffer.isBuffer(passwordProtection.derivedKey) || passwordProtection.derivedKey.length !== 32) {
+            throw new Error('Invalid password protection data');
+        }
+    }
     const fileId = uuidv4();
     const fileData = await fsPromises.readFile(filePath);
     const fileSize = fileData.length;
 
     progressCallback({ stage: 'splitting', progress: 0 });
 
+    // Calculate chunk size based on target PNG size
+    const chunkSize = calculateChunkSize(targetPngSizeMB);
+    console.log(`Target PNG size: ${targetPngSizeMB} MB, Calculated chunk size: ${(chunkSize / 1024 / 1024).toFixed(2)} MB`);
+
     // Split into chunks
-    const chunks = splitIntoChunks(fileData);
+    const chunks = splitIntoChunks(fileData, chunkSize);
     const chunkCount = chunks.length;
 
     progressCallback({ stage: 'encrypting', progress: 0 });
@@ -55,11 +120,39 @@ async function processFileToImages(filePath, originalFilename, mimeType, progres
         expiresAt
     );
 
+    // Store encryption keys with password protection info
+    const isPasswordProtected = passwordProtection && passwordProtection.enabled ? 1 : 0;
+    let salt = null;
+    let iv = null;
+    let encryptedSecretKeyBase64 = null;
+
+    if (isPasswordProtected) {
+        // Encrypt the Kyber secret key with the password-derived key
+        salt = passwordProtection.salt;
+        iv = passwordProtection.iv;
+
+        const ivBuffer = Buffer.from(iv, 'base64');
+        const encryptedSecretKeyBuffer = encryptWithDerivedKey(
+            secretKey,
+            passwordProtection.derivedKey,
+            ivBuffer
+        );
+
+        encryptedSecretKeyBase64 = encryptedSecretKeyBuffer.toString('base64');
+        console.log('Kyber secret key encrypted with password-derived key');
+    }
+
     statements.insertEncryptionKey.run(
         fileId,
         publicKey,
-        secretKey,
-        now
+        // Keep the NOT NULL legacy column without retaining new plaintext protected keys.
+        // Historical rows are deliberately left unchanged.
+        isPasswordProtected ? Buffer.alloc(0) : secretKey,
+        now,
+        isPasswordProtected,
+        salt,
+        iv,
+        encryptedSecretKeyBase64
     );
 
     // Create directory for this file's PNGs
@@ -88,18 +181,30 @@ async function processFileToImages(filePath, originalFilename, mimeType, progres
             encryptedChunk
         ]);
 
-        // Encode to PNG
+        // Encode to PNG with password protection metadata
         const pngBuffer = await encodeToPNG(combinedData, {
             fileId,
             chunkIndex: i,
             totalChunks: chunkCount,
-            totalPngs: chunkCount
+            totalPngs: chunkCount,
+            passwordProtection: isPasswordProtected ? {
+                enabled: true,
+                salt,
+                iv,
+                encryptedSecretKey: encryptedSecretKeyBase64
+            } : null
         });
 
         // Save PNG
         const pngPath = path.join(fileDir, `${fileId}_${i}.png`);
         await fsPromises.writeFile(pngPath, pngBuffer);
         pngPaths.push(pngPath);
+
+        // Log actual PNG size for first file
+        if (i === 0) {
+            const actualSizeMB = (pngBuffer.length / 1024 / 1024).toFixed(2);
+            console.log(`First PNG actual size: ${actualSizeMB} MB (target: ${targetPngSizeMB} MB)`);
+        }
 
         progressCallback({
             stage: 'generating',
@@ -123,108 +228,91 @@ async function processFileToImages(filePath, originalFilename, mimeType, progres
 }
 
 /**
- * Process uploaded PNGs to reconstruct original file
- * @param {Array<string>} pngPaths - Paths to uploaded PNG files
- * @param {Function} progressCallback - Callback for progress updates
- * @returns {Promise<Object>} { success, filePath, originalFilename, missingCount }
+ * Reconstruct a PNG set, enforcing the database's protection state on every path.
+ * PNG metadata is an untrusted locator, never authorization to use plaintext keys.
+ * @param {Array<string>} pngPaths
+ * @param {Function} progressCallback
+ * @param {Buffer|null} derivedKey Password-derived AES key, when supplied
  */
-async function processImagesToFile(pngPaths, progressCallback) {
+async function processImagesToFile(pngPaths, progressCallback, derivedKey = null) {
+    if (!pngPaths.length) throw new Error('No PNG files found');
     progressCallback({ stage: 'reading', progress: 0 });
 
-    // Decode all PNGs
     const pngData = [];
     for (let i = 0; i < pngPaths.length; i++) {
-        const pngBuffer = await fsPromises.readFile(pngPaths[i]);
-        const decoded = await decodeFromPNG(pngBuffer);
-        pngData.push(decoded);
-
-        progressCallback({
-            stage: 'reading',
-            progress: ((i + 1) / pngPaths.length) * 50
-        });
+        pngData.push(await decodeFromPNG(await fsPromises.readFile(pngPaths[i])));
+        progressCallback({ stage: 'reading', progress: ((i + 1) / pngPaths.length) * 50 });
     }
 
-    // Validate all PNGs belong to same file
-    const fileIdHashes = [...new Set(pngData.map(d => d.metadata.fileIdHash))];
-    if (fileIdHashes.length > 1) {
-        throw new Error('PNGs belong to different files');
+    const { fileIdHash, totalPngs, totalChunks } = pngData[0].metadata;
+    if (totalPngs < 1 || totalChunks !== totalPngs) throw new Error('Invalid PNG counts');
+    const indexes = new Set();
+    for (const { metadata } of pngData) {
+        if (metadata.fileIdHash !== fileIdHash || metadata.totalPngs !== totalPngs || metadata.totalChunks !== totalChunks) {
+            throw new Error('PNGs belong to different files or have inconsistent counts');
+        }
+        if (metadata.chunkIndex >= totalChunks || indexes.has(metadata.chunkIndex)) {
+            throw new Error('Duplicate or invalid PNG chunk index');
+        }
+        indexes.add(metadata.chunkIndex);
     }
 
-    const totalPngs = pngData[0].metadata.totalPngs;
-    const uploadedPngs = pngPaths.length;
+    // Legacy headers contain only a 32-bit hash. Reject ambiguity rather than
+    // choosing the first row, especially if colliding rows have different protection.
+    const matches = statements.getAllFiles.all().filter(file =>
+        file.png_count === totalPngs && file.chunk_count === totalChunks && hashStringTo4Bytes(file.id) === fileIdHash);
+    if (matches.length !== 1) throw new Error('File not found or ambiguous PNG file identifier');
+    const fileInfo = matches[0];
+    const keyData = statements.getEncryptionKey.get(fileInfo.id);
+    if (!keyData) throw new Error('Encryption key not found');
 
-    if (uploadedPngs < totalPngs) {
+    let secretKey;
+    if (requiresPassword(keyData)) {
+        // Validate the historical wrapper even before prompting. Broken protected
+        // records require explicit recovery, never a fallback to their plaintext key.
+        validateProtectionMetadata(keyData);
+        if (derivedKey === null) {
+            return {
+                success: false, passwordRequired: true,
+                totalCount: totalPngs, uploadedCount: pngPaths.length,
+                salt: keyData.salt, iv: keyData.iv
+            };
+        }
+        secretKey = unwrapSecretKey(keyData, derivedKey);
+    } else {
+        secretKey = keyData.secret_key;
+    }
+
+    if (pngPaths.length < totalPngs) {
         return {
-            success: false,
-            missingCount: totalPngs - uploadedPngs,
-            totalCount: totalPngs,
-            uploadedCount: uploadedPngs
+            success: false, missingCount: totalPngs - pngPaths.length,
+            totalCount: totalPngs, uploadedCount: pngPaths.length
         };
     }
 
-    progressCallback({ stage: 'decrypting', progress: 50 });
-
-    // Sort by chunk index
     pngData.sort((a, b) => a.metadata.chunkIndex - b.metadata.chunkIndex);
-
-    // Get file info from database
-    // Match by PNG count and verify file ID hash
-    const allFiles = statements.getAllFiles.all();
-    const fileIdHash = pngData[0].metadata.fileIdHash;
-
-    const fileInfo = allFiles.find(f => {
-        const computedHash = hashStringTo4Bytes(f.id);
-        return f.png_count === totalPngs && computedHash === fileIdHash;
-    });
-
-    if (!fileInfo) {
-        throw new Error(`File not found in database (PNG count: ${totalPngs}, uploaded: ${uploadedPngs}, hash: ${fileIdHash})`);
-    }
-
-    // Get encryption key
-    const keyData = statements.getEncryptionKey.get(fileInfo.id);
-    if (!keyData) {
-        throw new Error('Encryption key not found');
-    }
-
-    const secretKey = keyData.secret_key;
-
-    // Decrypt all chunks
+    progressCallback({ stage: 'decrypting', progress: 50 });
     const decryptedChunks = [];
     for (let i = 0; i < pngData.length; i++) {
         const { data } = pngData[i];
-
-        // Extract Kyber ciphertext length
-        const kyberCiphertextLength = (data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3];
-
-        // Extract Kyber ciphertext and encrypted chunk
-        const kyberCiphertext = data.slice(4, 4 + kyberCiphertextLength);
-        const encryptedChunk = data.slice(4 + kyberCiphertextLength);
-
-        // Decrypt
-        const decryptedChunk = decryptChunk(kyberCiphertext, encryptedChunk, secretKey);
-        decryptedChunks.push(decryptedChunk);
-
-        progressCallback({
-            stage: 'decrypting',
-            progress: 50 + ((i + 1) / pngData.length) * 50
-        });
+        // ML-KEM-768 ciphertext plus the AES-GCM IV and authentication tag.
+        if (data.length < 4 + 1088 + 28 || data.readUInt32BE(0) !== 1088) {
+            throw new Error('Invalid encrypted PNG chunk');
+        }
+        const kyberCiphertext = data.subarray(4, 4 + 1088);
+        const encryptedChunk = data.subarray(4 + 1088);
+        decryptedChunks.push(decryptChunk(kyberCiphertext, encryptedChunk, secretKey));
+        progressCallback({ stage: 'decrypting', progress: 50 + ((i + 1) / pngData.length) * 50 });
     }
 
-    // Combine chunks
     const reconstructedFile = Buffer.concat(decryptedChunks);
-
-    // Save reconstructed file
+    if (reconstructedFile.length !== fileInfo.original_size) throw new Error('Reconstructed file size mismatch');
     const outputPath = path.join(DOWNLOADS_DIR, `${fileInfo.id}_reconstructed`);
     await fsPromises.writeFile(outputPath, reconstructedFile);
-
     progressCallback({ stage: 'complete', progress: 100 });
-
     return {
-        success: true,
-        filePath: outputPath,
-        originalFilename: fileInfo.original_filename,
-        fileId: fileInfo.id
+        success: true, filePath: outputPath,
+        originalFilename: fileInfo.original_filename, fileId: fileInfo.id
     };
 }
 
