@@ -1,1071 +1,594 @@
-console.log('=== InPlainSight JS v7 Loading ===');
+'use strict';
 
-// Debug logging system
-const debugOutput = document.getElementById('debug-output');
-const clearDebugBtn = document.getElementById('clear-debug');
-
-function debugLog(message, type = 'info') {
-    const timestamp = new Date().toLocaleTimeString();
+// This client uses the existing server API and password derivation protocol.
+// Files, keys, session IDs, bearer links and raw server errors never enter the log.
+const debugOutput = document.getElementById('diagnostic-log');
+function debugLog(message) {
     const entry = document.createElement('div');
-    entry.className = `debug-entry ${type}`;
     const time = document.createElement('span');
-    time.className = 'debug-timestamp';
-    time.textContent = `[${timestamp}]`;
+    time.textContent = `${new Date().toLocaleTimeString()}  `;
     entry.appendChild(time);
     entry.appendChild(document.createTextNode(String(message)));
     debugOutput.appendChild(entry);
-    debugOutput.scrollTop = debugOutput.scrollHeight;
-
-    // Also log to console
-    console.log(`[DEBUG ${type}] ${message}`);
+    if (debugOutput.children.length > 50) debugOutput.firstElementChild.remove();
 }
-
 // Clear debug button
-if (clearDebugBtn) {
-    clearDebugBtn.addEventListener('click', () => {
-        debugOutput.innerHTML = '';
-    });
-}
-
-// Determine base path for API calls
-// Extract directory path, removing any filename
+const $ = id => document.getElementById(id);
+$('clear-diagnostics').addEventListener('click', () => debugOutput.replaceChildren());
+const MAX_SIZE = 10 * 1024 * 1024 * 1024;
 const pathname = window.location.pathname;
-const BASE_PATH = pathname.endsWith('/')
-    ? pathname
-    : pathname.substring(0, pathname.lastIndexOf('/') + 1);
+const BASE_PATH = pathname.endsWith('/') ? pathname : pathname.slice(0, pathname.lastIndexOf('/') + 1);
+const modes = ['encode', 'decode'];
+const jobs = Object.fromEntries(modes.map(mode => [mode, {
+    mode, files: [], view: 'choose', generation: 0, busy: false,
+    xhr: null, controller: null, timer: null, session: null,
+    salt: null, fileId: null, pngCount: 0, shownPngs: 0
+}]));
+let activeMode = 'encode';
+let copyGeneration = 0;
 
-debugLog(`App loaded. BASE_PATH: ${BASE_PATH}`, 'success');
-debugLog(`User Agent: ${navigator.userAgent}`, 'info');
-debugLog(`Platform: ${navigator.platform}`, 'info');
+function formatSize(bytes) {
+    if (!bytes) return '0 bytes';
+    const unit = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), 3);
+    return `${Number((bytes / 1024 ** unit).toFixed(1))} ${['bytes', 'KB', 'MB', 'GB'][unit]}`;
+}
 
-// Tab switching
-const tabButtons = document.querySelectorAll('.tab-button');
-const tabContents = document.querySelectorAll('.tab-content');
+function focusInView(mode, selector = 'h2') {
+    if (activeMode !== mode) return;
+    const el = $(`${mode}-panel`).querySelector(selector === 'h2' ? '.view:not([hidden]) h2' : selector);
+    if (el) { el.setAttribute('tabindex', '-1'); el.focus({ preventScroll: true }); }
+}
 
-tabButtons.forEach(button => {
-    button.addEventListener('click', () => {
-        const tabName = button.dataset.tab;
-
-        // Remove active class from all buttons and contents
-        tabButtons.forEach(btn => btn.classList.remove('active'));
-        tabContents.forEach(content => content.classList.remove('active'));
-
-        // Add active class to clicked button and corresponding content
-        button.classList.add('active');
-        document.getElementById(`${tabName}-tab`).classList.add('active');
+function showView(mode, view, focus = false) {
+    const job = jobs[mode];
+    job.view = view;
+    for (const name of ['choose', 'review', 'progress', 'result']) $(`${mode}-${name}`).hidden = name !== view;
+    if (mode === 'decode') $('password-panel').hidden = view !== 'password';
+    $(`${mode}-reset-row`).hidden = view === 'choose' && !job.files.length;
+    $(`${mode}-keep`).hidden = !job.files.length;
+    $(`${mode}-panel`).querySelectorAll('.steps li').forEach(li => {
+        const step = view === 'password' || view === 'progress' ? 'review' : view;
+        li.classList.toggle('done', ['choose', 'review', 'result'].indexOf(li.dataset.step) < ['choose', 'review', 'result'].indexOf(step));
+        if (li.dataset.step === step) li.setAttribute('aria-current', 'step');
+        else li.removeAttribute('aria-current');
     });
-});
+    if (focus) focusInView(mode);
+}
 
-// ==================== ENCODE TAB ====================
+function clearError(mode) {
+    $(`${mode}-error`).hidden = true;
+    $(`${mode}-error`).textContent = '';
+    $(`${mode}-retry`).hidden = true;
+}
 
-// PNG Size Slider
-const pngSizeSlider = document.getElementById('png-size-slider');
-const pngSizeValue = document.getElementById('png-size-value');
-const encodePassword = document.getElementById('encode-password');
-
-console.log('PNG Size Slider element:', pngSizeSlider);
-console.log('Initial slider value:', pngSizeSlider?.value);
-
-pngSizeSlider.addEventListener('input', (e) => {
-    pngSizeValue.textContent = e.target.value;
-    console.log('Slider changed to:', e.target.value);
-});
-
-const encodeUploadBox = document.getElementById('encode-upload-box');
-const encodeFileInput = document.getElementById('encode-file-input');
-const encodeSelectedFile = document.getElementById('encode-selected-file');
-const encodeLinkSection = document.getElementById('encode-link-section');
-const shareableLink = document.getElementById('shareable-link');
-const copyLinkBtn = document.getElementById('copy-link-btn');
-const encodeProgressSection = document.getElementById('encode-progress-section');
-const encodeProgressFill = document.getElementById('encode-progress-fill');
-const encodeProgressText = document.getElementById('encode-progress-text');
-const encodeResultsSection = document.getElementById('encode-results-section');
-const downloadZipBtn = document.getElementById('download-zip-btn');
-const startNewBtn = document.getElementById('start-new-btn');
-const pngGallery = document.getElementById('png-gallery');
-const galleryGrid = document.getElementById('gallery-grid');
-const pngCount = document.getElementById('png-count');
-
-let currentEncodeFile = null;
-let currentFileId = null;
-let currentDownloadToken = null;
-let currentSessionId = null;
-
-// Copy link button
-copyLinkBtn.addEventListener('click', () => {
-    shareableLink.select();
-    document.execCommand('copy');
-    const originalText = copyLinkBtn.textContent;
-    copyLinkBtn.textContent = 'Copied!';
-    setTimeout(() => {
-        copyLinkBtn.textContent = originalText;
-    }, 2000);
-});
-
-// Click to upload
-encodeUploadBox.addEventListener('click', () => {
-    encodeFileInput.click();
-});
-
-// File selection
-encodeFileInput.addEventListener('change', (e) => {
-    debugLog(`File input changed, files count: ${e.target.files.length}`, 'info');
-    if (e.target.files.length > 0) {
-        currentEncodeFile = e.target.files[0];
-        debugLog(`File selected: ${currentEncodeFile.name}`, 'info');
-        debugLog(`File size: ${formatFileSize(currentEncodeFile.size)} (${currentEncodeFile.size} bytes)`, 'info');
-        debugLog(`File type: ${currentEncodeFile.type || 'unknown'}`, 'info');
-        debugLog(`Last modified: ${new Date(currentEncodeFile.lastModified).toLocaleString()}`, 'info');
-        encodeSelectedFile.textContent = `Selected: ${currentEncodeFile.name} (${formatFileSize(currentEncodeFile.size)})`;
-        debugLog('Calling uploadAndEncodeFile()', 'info');
-        uploadAndEncodeFile();
+function showError(mode, message, { statusRetry = false } = {}) {
+    const job = jobs[mode];
+    job.busy = false;
+    setDisabled(mode, false);
+    const el = $(`${mode}-error`);
+    el.textContent = message;
+    el.hidden = false;
+    if (statusRetry) {
+        showView(mode, 'progress');
+        $(`${mode}-status`).textContent = 'Status check paused';
+        $(`${mode}-retry`).hidden = false;
     } else {
-        debugLog('No files selected', 'error');
+        showView(mode, job.files.length ? 'review' : 'choose');
     }
-});
+    if (activeMode === mode) { el.setAttribute('tabindex', '-1'); el.focus({ preventScroll: true }); }
+    debugLog(mode === 'encode' ? 'Hide: attention needed.' : 'Recover: attention needed.');
+}
 
-// Drag and drop
-encodeUploadBox.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    encodeUploadBox.classList.add('drag-over');
-});
+function setDisabled(mode, disabled) {
+    $(`${mode}-start`).disabled = disabled;
+    if (mode === 'decode') $('password-submit').disabled = disabled;
+}
 
-encodeUploadBox.addEventListener('dragleave', () => {
-    encodeUploadBox.classList.remove('drag-over');
-});
+// Bump the generation BEFORE aborting. Late XHR, fetch and crypto completions
+// can then never write into a newer attempt or a cleared screen.
+function stopJob(mode) {
+    const job = jobs[mode];
+    job.generation++;
+    clearTimeout(job.timer);
+    job.timer = null;
+    job.controller?.abort();
+    job.controller = null;
+    job.xhr?.abort();
+    job.xhr = null;
+    job.busy = false;
+    setDisabled(mode, false);
+    return job.generation;
+}
 
-encodeUploadBox.addEventListener('drop', (e) => {
-    e.preventDefault();
-    encodeUploadBox.classList.remove('drag-over');
+function resetPassword(id, clear = true) {
+    if (clear) $(id).value = '';
+    $(id).type = 'password';
+    const toggle = document.querySelector(`[data-reveal="${id}"]`);
+    toggle.textContent = 'Show';
+    toggle.setAttribute('aria-pressed', 'false');
+}
 
-    if (e.dataTransfer.files.length > 0) {
-        currentEncodeFile = e.dataTransfer.files[0];
-        encodeSelectedFile.textContent = `Selected: ${currentEncodeFile.name} (${formatFileSize(currentEncodeFile.size)})`;
-        uploadAndEncodeFile();
-    }
-});
+function clearSessionUrl() {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('session');
+    window.history.replaceState(null, '', url);
+}
 
-// Upload and encode file
-async function uploadAndEncodeFile() {
-    debugLog('=== UPLOAD STARTED ===', 'success');
-    debugLog(`File: ${currentEncodeFile.name}`, 'info');
-    debugLog(`Size: ${formatFileSize(currentEncodeFile.size)}`, 'info');
-    debugLog(`Target PNG Size: ${pngSizeSlider.value} MB`, 'info');
-
-    // Check for password protection
-    const password = encodePassword.value.trim();
-    const usePassword = password.length > 0;
-    if (usePassword) {
-        debugLog('Password protection ENABLED', 'success');
+function reset(mode, focus = true) {
+    stopJob(mode);
+    Object.assign(jobs[mode], { files: [], session: null, salt: null, fileId: null, pngCount: 0, shownPngs: 0 });
+    $(`${mode}-file-input`).value = '';
+    clearError(mode);
+    setProgress(mode, 'Ready', null);
+    resetPassword(`${mode}-password`);
+    if (mode === 'encode') {
+        $('encode-return').hidden = true;
+        $('encode-return').open = false;
+        $('return-url').value = '';
+        $('copy-status').textContent = '';
+        copyGeneration++;
+        $('download-zip').removeAttribute('href');
+        $('png-gallery').replaceChildren();
+        $('png-details').open = false;
+        $('png-size-slider').value = '10';
+        $('png-size-value').value = '10';
+        clearSessionUrl();
     } else {
-        debugLog('No password - files will expire in 1 hour', 'info');
+        $('password-error').hidden = true;
+        $('download-original').removeAttribute('href');
+        $('original-filename').textContent = '';
     }
+    showView(mode, 'choose', focus);
+}
 
-    // Verify file is valid
-    if (!currentEncodeFile || currentEncodeFile.size === 0) {
-        debugLog('ERROR: File is invalid or empty!', 'error');
-        alert('Selected file is invalid or empty. Please try again.');
-        resetEncodeTab();
-        return;
-    }
-
-    // Hide upload box, show progress
-    encodeUploadBox.style.display = 'none';
-    encodeSelectedFile.style.display = 'none';
-    encodeLinkSection.style.display = 'none';
-    encodeProgressSection.style.display = 'block';
-    encodeResultsSection.style.display = 'none';
-
-    const formData = new FormData();
-
-    try {
-        formData.append('file', currentEncodeFile);
-        formData.append('targetPngSizeMB', pngSizeSlider.value);
-
-        // If password is set, derive key and add to form data
-        if (usePassword) {
-            encodeProgressText.textContent = 'Deriving encryption key from password...';
-            debugLog('Deriving key from password using PBKDF2...', 'info');
-
-            // Generate random salt and IV
-            const salt = window.crypto.getRandomValues(new Uint8Array(32));
-            const iv = window.crypto.getRandomValues(new Uint8Array(12));
-
-            // Derive key from password
-            const derivedKey = await deriveKeyFromPassword(password, salt);
-
-            // Export the derived key to send to server (for encrypting Kyber secret key)
-            const exportedKey = await window.crypto.subtle.exportKey('raw', derivedKey);
-            const derivedKeyBase64 = arrayToBase64(new Uint8Array(exportedKey));
-
-            // Add password protection info to form data
-            formData.append('passwordProtected', 'true');
-            formData.append('salt', arrayToBase64(salt));
-            formData.append('iv', arrayToBase64(iv));
-            formData.append('derivedKey', derivedKeyBase64);
-
-            debugLog('Key derived successfully. Salt and IV generated.', 'success');
-            encodeProgressText.textContent = 'Uploading...';
-        }
-
-        debugLog('FormData created, file appended successfully', 'info');
-    } catch (err) {
-        debugLog(`ERROR creating FormData: ${err.message}`, 'error');
-        alert('Error preparing file for upload. Please try again.');
-        resetEncodeTab();
-        return;
-    }
-
-    const xhr = new XMLHttpRequest();
-    debugLog('XMLHttpRequest created', 'info');
-
-    // Set timeout to 2 hours (matches server timeout)
-    xhr.timeout = 2 * 60 * 60 * 1000;
-    debugLog('XHR timeout set to 2 hours', 'info');
-
-    // Safari upload progress workaround
-    // Safari often doesn't fire upload.progress events for large files
-    let uploadStartTime = Date.now();
-    let progressCheckInterval = null;
-    let lastProgressEvent = false;
-    let safariProgressCounter = 0;
-
-    // Track upload progress
-    xhr.upload.addEventListener('progress', (e) => {
-        lastProgressEvent = true;
-        clearInterval(progressCheckInterval); // Stop workaround if real progress events work
-
-        if (e.lengthComputable) {
-            const percentComplete = (e.loaded / e.total) * 100;
-            encodeProgressFill.style.width = `${percentComplete}%`;
-            encodeProgressText.textContent = `Uploading... ${Math.round(percentComplete)}%`;
-            if (percentComplete % 10 === 0 || percentComplete === 100) {
-                debugLog(`Upload progress: ${Math.round(percentComplete)}% (${e.loaded}/${e.total} bytes)`, 'info');
-            }
-        } else {
-            debugLog('Upload progress: lengthComputable is false', 'error');
-        }
+function switchMode(mode, updateHistory = true) {
+    activeMode = mode;
+    modes.forEach(name => {
+        const tab = $(name === 'encode' ? 'hide-tab' : 'recover-tab');
+        tab.setAttribute('aria-selected', String(name === mode));
+        tab.tabIndex = name === mode ? 0 : -1;
+        $(`${name}-panel`).hidden = name !== mode;
     });
-
-    // Workaround for Safari not firing progress events
-    xhr.upload.addEventListener('loadstart', () => {
-        debugLog('Upload.loadstart fired - starting Safari progress workaround', 'info');
-
-        // Poll every 2 seconds to show upload is still happening
-        progressCheckInterval = setInterval(() => {
-            if (!lastProgressEvent) {
-                safariProgressCounter++;
-                const elapsed = Math.floor((Date.now() - uploadStartTime) / 1000);
-                const speed = (currentEncodeFile.size / elapsed / 1024 / 1024).toFixed(2);
-
-                encodeProgressText.textContent = `Uploading... (${elapsed}s elapsed, Safari progress mode)`;
-
-                // Animate progress bar to show activity (fake progress based on time)
-                const estimatedProgress = Math.min(95, (elapsed / 120) * 100); // Assume ~2min for full upload, max 95%
-                encodeProgressFill.style.width = `${estimatedProgress}%`;
-
-                // Log XHR state
-                const readyStateNames = ['UNSENT', 'OPENED', 'HEADERS_RECEIVED', 'LOADING', 'DONE'];
-                const stateName = readyStateNames[xhr.readyState] || 'UNKNOWN';
-
-                if (safariProgressCounter % 5 === 0) {
-                    debugLog(`Upload still in progress... ${elapsed}s elapsed, XHR state: ${stateName} (${xhr.readyState})`, 'info');
-                }
-            }
-        }, 2000);
-    });
-
-    // Handle upload completion
-    xhr.addEventListener('load', () => {
-        clearInterval(progressCheckInterval); // Stop Safari workaround
-        debugLog(`XHR load event fired. Status: ${xhr.status}`, 'info');
-
-        if (xhr.status === 200) {
-            debugLog('Upload successful! Response received', 'success');
-            const response = JSON.parse(xhr.responseText);
-            currentSessionId = response.sessionId;
-            debugLog(`Session ID: ${currentSessionId}`, 'info');
-
-            // Show shareable link
-            const shareUrl = `${window.location.origin}${BASE_PATH}?session=${currentSessionId}`;
-            shareableLink.value = shareUrl;
-            encodeLinkSection.style.display = 'block';
-
-            // Start polling for processing progress
-            encodeProgressText.textContent = 'Upload complete! Processing...';
-            encodeProgressFill.style.width = '100%';
-            debugLog('Starting progress polling', 'info');
-            pollProgress(currentSessionId, 'encode');
-        } else {
-            debugLog(`Upload error! Status: ${xhr.status} ${xhr.statusText}`, 'error');
-            debugLog(`Response: ${xhr.responseText}`, 'error');
-            alert('Error uploading file. Please try again.');
-            resetEncodeTab();
-        }
-    });
-
-    xhr.addEventListener('error', (e) => {
-        clearInterval(progressCheckInterval);
-        debugLog('XHR error event fired', 'error');
-        debugLog(`Error details: ${JSON.stringify(e)}`, 'error');
-        debugLog(`ReadyState: ${xhr.readyState}, Status: ${xhr.status}`, 'error');
-        alert('Network error during upload. Please check your connection and try again.');
-        resetEncodeTab();
-    });
-
-    xhr.addEventListener('timeout', () => {
-        clearInterval(progressCheckInterval);
-        debugLog('XHR timeout event fired after 2 hours', 'error');
-        alert('Upload timed out. This file may be too large or your connection too slow. Please try again.');
-        resetEncodeTab();
-    });
-
-    xhr.addEventListener('loadstart', () => {
-        debugLog('XHR loadstart event fired - upload beginning', 'info');
-    });
-
-    xhr.addEventListener('loadend', () => {
-        clearInterval(progressCheckInterval);
-        const elapsed = Math.floor((Date.now() - uploadStartTime) / 1000);
-        debugLog(`XHR loadend event fired - upload finished after ${elapsed}s`, 'info');
-    });
-
-    xhr.addEventListener('abort', () => {
-        clearInterval(progressCheckInterval);
-        debugLog('XHR abort event fired - upload cancelled', 'error');
-    });
-
-    const url = `${BASE_PATH}api/encode`;
-    debugLog(`Opening XHR POST to: ${url}`, 'info');
-    xhr.open('POST', url, true);
-    debugLog('Sending FormData...', 'info');
-
-    try {
-        xhr.send(formData);
-        debugLog('xhr.send() called successfully', 'success');
-    } catch (err) {
-        debugLog(`Error calling xhr.send(): ${err.message}`, 'error');
-        debugLog(`Error stack: ${err.stack}`, 'error');
+    if (updateHistory) {
+        const hash = mode === 'encode' ? '#hide' : '#recover';
+        if (window.location.hash !== hash) window.history.pushState(null, '', `${window.location.pathname}${window.location.search}${hash}`);
     }
 }
 
-// Poll for progress
-async function pollProgress(sessionId, type) {
-    const progressFill = type === 'encode' ? encodeProgressFill : decodeProgressFill;
-    const progressText = type === 'encode' ? encodeProgressText : decodeProgressText;
+for (const [index, tab] of [$('hide-tab'), $('recover-tab')].entries()) {
+    tab.addEventListener('click', () => switchMode(tab.dataset.mode));
+    tab.addEventListener('keydown', event => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? 1 : 1 - index;
+        const target = $(next ? 'recover-tab' : 'hide-tab');
+        switchMode(target.dataset.mode);
+        target.focus();
+    });
+}
+function navigateHistory() {
+    switchMode(window.location.hash === '#recover' ? 'decode' : 'encode', false);
+    // History navigates task tabs, never resurrects a reset job or reuploads.
+    // Keep the address consistent with the job still displayed in this page.
+    const url = new URL(window.location.href);
+    if (jobs.encode.session) url.searchParams.set('session', jobs.encode.session);
+    else url.searchParams.delete('session');
+    window.history.replaceState(null, '', url);
+}
+window.addEventListener('popstate', navigateHistory);
+window.addEventListener('hashchange', navigateHistory);
+$('go-recover').addEventListener('click', () => { switchMode('decode'); $('recover-tab').focus(); });
 
-    const interval = setInterval(async () => {
+function validateSelection(mode, files) {
+    if (!files.length) return 'Choose a file to continue.';
+    if (mode === 'encode' && files.length !== 1) return 'Choose one file at a time to hide.';
+    if (files.some(file => file.size === 0)) return 'This selection includes an empty file. Choose a non-empty file.';
+    if (files.some(file => file.size > MAX_SIZE)) return 'Each file must be 10 GB or smaller. Choose a smaller file.';
+    if (mode === 'decode') {
+        const isZip = file => /\.zip$/i.test(file.name);
+        const isPng = file => /\.png$/i.test(file.name);
+        if (files.some(file => !isZip(file) && !isPng(file))) return 'Choose a ZIP bundle or PNG images created by InPlainSight.';
+        if (files.some(isZip) && (files.length !== 1 || !isZip(files[0]))) return 'Choose one ZIP bundle, or select all PNGs together. Don’t mix ZIPs and PNGs.';
+    }
+    return null;
+}
+
+function selectFiles(mode, selected) {
+    const job = jobs[mode];
+    if (job.busy) return;
+    const files = Array.from(selected);
+    if (!files.length) return; // Closing the system picker leaves the current choice intact.
+    const error = validateSelection(mode, files);
+    if (error) { showError(mode, error); return; }
+    stopJob(mode);
+    job.files = files;
+    job.session = null;
+    job.salt = null;
+    clearError(mode);
+    if (mode === 'encode') {
+        $('encode-return').hidden = true;
+        $('return-url').value = '';
+        $('copy-status').textContent = '';
+        copyGeneration++;
+        clearSessionUrl();
+    } else resetPassword('decode-password');
+    $(`${mode}-selection`).textContent = files.length === 1 ? files[0].name : `${files.length} PNG images`;
+    $(`${mode}-size`).textContent = `${formatSize(files.reduce((sum, file) => sum + file.size, 0))}${files.length > 1 ? ' total' : ''}`;
+    if (mode === 'decode') $('decode-file-list').textContent = files.length > 1 ? files.map(file => file.name).join(' · ') : '';
+    showView(mode, 'review', true);
+}
+
+modes.forEach(mode => {
+    const input = $(`${mode}-file-input`);
+    input.addEventListener('change', () => { selectFiles(mode, input.files); input.value = ''; });
+    const drop = $(`${mode}-drop-zone`);
+    for (const type of ['dragenter', 'dragover']) drop.addEventListener(type, event => { event.preventDefault(); drop.classList.add('drag-over'); });
+    for (const type of ['dragleave', 'drop']) drop.addEventListener(type, event => { event.preventDefault(); drop.classList.remove('drag-over'); });
+    drop.addEventListener('drop', event => selectFiles(mode, event.dataTransfer.files));
+    $(`${mode}-keep`).addEventListener('click', () => { clearError(mode); showView(mode, 'review', true); });
+    $(`${mode}-back`).addEventListener('click', () => { stopJob(mode); clearError(mode); showView(mode, 'choose', true); });
+    $(`${mode}-reset`).addEventListener('click', () => reset(mode));
+    $(`${mode}-retry`).addEventListener('click', () => {
+        const job = jobs[mode];
+        if (job.busy || !job.session) return;
+        const generation = stopJob(mode);
+        job.busy = true;
+        clearError(mode);
+        setDisabled(mode, true);
+        setProgress(mode, 'Checking the job again…', null);
+        poll(mode, generation);
+    });
+    $(`${mode}-form`).addEventListener('submit', event => { event.preventDefault(); start(mode); });
+});
+// Prevent a dropped file outside a drop target from replacing the application.
+window.addEventListener('dragover', event => event.preventDefault());
+window.addEventListener('drop', event => event.preventDefault());
+$('png-size-slider').addEventListener('input', event => { $('png-size-value').value = event.target.value; });
+document.querySelectorAll('[data-reveal]').forEach(button => button.addEventListener('click', () => {
+    const input = $(button.dataset.reveal);
+    const reveal = input.type === 'password';
+    input.type = reveal ? 'text' : 'password';
+    button.textContent = reveal ? 'Hide' : 'Show';
+    button.setAttribute('aria-pressed', String(reveal));
+}));
+
+function setProgress(mode, text, amount = null) {
+    $(`${mode}-status`).textContent = text;
+    const bar = $(`${mode}-progress-bar`);
+    if (typeof amount === 'number' && Number.isFinite(amount)) bar.value = Math.min(100, Math.max(0, amount));
+    else bar.removeAttribute('value');
+}
+
+function publicError(error) {
+    // Match known API errors, but never echo arbitrary server strings or stacks.
+    const message = typeof error === 'string' ? error : '';
+    if (/Incorrect password/i.test(message)) return 'That password didn’t unlock this file. Check it and try again.';
+    if (/File not found|Encryption key not found|expired/i.test(message)) return 'This file is no longer available on the server. It may have expired. Saved images alone can’t recover it; use your original file.';
+    if (/different files|inconsistent counts/i.test(message)) return 'These images don’t belong to one complete set. Choose the original ZIP or all PNGs from the same file.';
+    if (/Duplicate|invalid PNG|Invalid encrypted PNG|size mismatch|No PNG|Unsupported image|corrupt/i.test(message)) return 'These images couldn’t be read as a complete file. Use the original, unchanged PNGs or ZIP bundle, with each PNG included once.';
+    if (/protection data|protected key|wrapped|wrapper/i.test(message)) return 'This protected file can’t be unlocked. Check your password and use the original images. If it still fails, create a new set from the original file.';
+    return 'The server couldn’t process this file. Check your selection and try again. If it keeps happening, try a smaller file or return later.';
+}
+
+async function start(mode, passwordAttempt = false) {
+    const job = jobs[mode];
+    if (job.busy) return;
+    const error = validateSelection(mode, job.files);
+    if (error) { showError(mode, error); return; }
+    const generation = stopJob(mode);
+    job.busy = true;
+    job.session = null;
+    if (mode === 'encode') {
+        $('encode-return').hidden = true;
+        $('return-url').value = '';
+        $('copy-status').textContent = '';
+        copyGeneration++;
+        clearSessionUrl();
+    }
+    clearError(mode);
+    $('password-error').hidden = true;
+    setDisabled(mode, true);
+    showView(mode, 'progress', true);
+    setProgress(mode, 'Preparing your file…', null);
+    let password = mode === 'encode' ? $('encode-password').value.trim() : $('decode-password').value.trim();
+    const form = new FormData();
+    try {
+        if (mode === 'encode') {
+            form.append('file', job.files[0]);
+            form.append('targetPngSizeMB', $('png-size-slider').value);
+            if (password) {
+                setProgress(mode, 'Preparing password protection…', null);
+                const salt = window.crypto.getRandomValues(new Uint8Array(32));
+                const iv = window.crypto.getRandomValues(new Uint8Array(12));
+                const derived = await deriveKeyFromPassword(password, salt);
+                const raw = await window.crypto.subtle.exportKey('raw', derived);
+                form.append('passwordProtected', 'true');
+                form.append('salt', arrayToBase64(salt));
+                form.append('iv', arrayToBase64(iv));
+                form.append('derivedKey', arrayToBase64(new Uint8Array(raw)));
+            }
+        } else {
+            for (const file of job.files) {
+                // The existing ZIP route is case sensitive; keep its protocol intact.
+                form.append('files', file, /\.zip$/i.test(file.name) ? file.name.replace(/\.zip$/i, '.zip') : file.name);
+            }
+            if (passwordAttempt) {
+                if (!job.salt || !password) throw new Error('Password preparation failed');
+                setProgress(mode, 'Preparing your password…', null);
+                const key = await deriveKeyFromPassword(password, base64ToArray(job.salt));
+                const raw = await window.crypto.subtle.exportKey('raw', key);
+                form.append('derivedKey', arrayToBase64(new Uint8Array(raw)));
+            }
+        }
+        if (job.generation !== generation) return;
+        // Keep encode protection intent through upload/processing failures.
+        // Retain it only in this page's field until success or explicit reset.
+        // Otherwise a one-click retry could silently create an unprotected file.
+        resetPassword(`${mode}-password`, mode !== 'encode');
+        password = '';
+        upload(mode, generation, form, passwordAttempt ? 'decode-with-password' : mode);
+    } catch {
+        if (job.generation !== generation) return;
+        resetPassword(`${mode}-password`, mode !== 'encode');
+        showError(mode, 'Your browser couldn’t prepare password protection. Use a current browser over HTTPS and try again.');
+    }
+}
+
+function upload(mode, generation, form, endpoint) {
+    const job = jobs[mode];
+    const xhr = new XMLHttpRequest();
+    job.xhr = xhr;
+    xhr.timeout = 2 * 60 * 60 * 1000;
+    const current = () => job.generation === generation;
+    setProgress(mode, mode === 'encode' ? 'Uploading your file…' : 'Uploading your images…', null);
+    debugLog(mode === 'encode' ? 'Hide: upload started.' : 'Recover: upload started.');
+    xhr.upload.addEventListener('progress', event => {
+        if (!current()) return;
+        const percent = event.lengthComputable ? Math.round(event.loaded / event.total * 100) : null;
+        setProgress(mode, percent === null ? 'Uploading…' : percent === 100 ? 'Upload sent. Waiting for the server…' : `Uploading… ${percent}%`, percent);
+    });
+    xhr.addEventListener('load', () => {
+        if (!current()) return;
+        job.xhr = null;
+        if (xhr.status < 200 || xhr.status >= 300) {
+            showError(mode, xhr.status === 413 ? 'The server rejected this upload size. Choose a smaller file and try again.' : 'The upload wasn’t accepted. Your selection is still here; check your connection and try again.');
+            return;
+        }
         try {
-            const response = await fetch(`${BASE_PATH}api/progress/${sessionId}`);
-            const progress = await response.json();
-
-            // Update progress bar
-            progressFill.style.width = `${progress.progress}%`;
-
-            // Update text
-            const stageTexts = {
-                'starting': 'Starting...',
-                'splitting': 'Splitting file into chunks...',
-                'encrypting': 'Encrypting with post-quantum cryptography...',
-                'generating': `Generating PNG images... ${Math.round(progress.progress)}%`,
-                'zipping': 'Creating ZIP bundle...',
-                'reading': `Reading PNG images... ${Math.round(progress.progress)}%`,
-                'decrypting': `Decrypting and reconstructing... ${Math.round(progress.progress)}%`,
-                'complete': 'Complete!',
-                'incomplete': 'Incomplete upload',
-                'password_required': 'Password required',
-                'error': 'Error occurred'
-            };
-
-            progressText.textContent = stageTexts[progress.stage] || 'Processing...';
-
-            // Check if complete
-            if (progress.stage === 'complete') {
-                clearInterval(interval);
-
-                if (type === 'encode') {
-                    showEncodeResults(progress);
-                } else {
-                    showDecodeResults(progress);
-                }
-            } else if (progress.stage === 'password_required') {
-                clearInterval(interval);
-                debugLog('Password-protected PNGs detected', 'info');
-                // Store salt and IV for password derivation
-                passwordSalt = progress.salt;
-                passwordIV = progress.iv;
-                debugLog(`Salt and IV received from server`, 'info');
-                showPasswordModal();
-            } else if (progress.stage === 'incomplete') {
-                clearInterval(interval);
-                showDecodeError(progress);
-            } else if (progress.stage === 'error') {
-                clearInterval(interval);
-                alert(`Error: ${progress.error}`);
-                if (type === 'encode') {
-                    resetEncodeTab();
-                } else {
-                    resetDecodeTab();
-                }
-            }
-        } catch (err) {
-            console.error('Error polling progress:', err);
-        }
-    }, 500); // Poll every 500ms
-}
-
-// Show encode results
-async function showEncodeResults(progress) {
-    currentFileId = progress.fileId;
-    currentDownloadToken = progress.downloadToken;
-
-    encodeProgressSection.style.display = 'none';
-    encodeResultsSection.style.display = 'block';
-
-    pngCount.textContent = progress.pngCount;
-
-    // Fetch file metadata to get PNG list
-    const response = await fetch(`${BASE_PATH}api/file/${currentFileId}`);
-    const fileData = await response.json();
-
-    // Populate gallery
-    galleryGrid.innerHTML = '';
-    for (let i = 0; i < fileData.pngCount; i++) {
-        const pngItem = createPngItem(currentFileId, i);
-        galleryGrid.appendChild(pngItem);
-    }
-}
-
-// Create PNG gallery item
-function createPngItem(fileId, index) {
-    const div = document.createElement('div');
-    div.className = 'png-item';
-
-    // Create container for image with loading spinner
-    const imgContainer = document.createElement('div');
-    imgContainer.className = 'png-preview-container';
-
-    // Create loading spinner
-    const spinner = document.createElement('div');
-    spinner.className = 'png-loading-spinner';
-
-    // Create image
-    const img = document.createElement('img');
-    img.className = 'png-preview';
-    img.src = `${BASE_PATH}api/png/${fileId}/${index}`;
-
-    // Hide spinner and show image when loaded
-    img.onload = () => {
-        spinner.classList.add('hidden');
-        img.classList.add('loaded');
-    };
-
-    // Handle error
-    img.onerror = () => {
-        spinner.classList.add('hidden');
-        img.classList.add('loaded');
-        console.error(`Failed to load image ${index}`);
-    };
-
-    imgContainer.appendChild(spinner);
-    imgContainer.appendChild(img);
-
-    const p = document.createElement('p');
-    p.textContent = `Image ${index + 1}`;
-
-    const btn = document.createElement('button');
-    btn.className = 'png-download-btn';
-    btn.textContent = 'Download';
-    btn.onclick = () => {
-        window.location.href = `${BASE_PATH}api/png/${fileId}/${index}`;
-    };
-
-    div.appendChild(imgContainer);
-    div.appendChild(p);
-    div.appendChild(btn);
-
-    return div;
-}
-
-// Download ZIP
-downloadZipBtn.addEventListener('click', () => {
-    window.location.href = `${BASE_PATH}api/download/${currentDownloadToken}`;
-});
-
-// Start new encode
-startNewBtn.addEventListener('click', () => {
-    resetEncodeTab();
-});
-
-function resetEncodeTab() {
-    encodeUploadBox.style.display = 'block';
-    encodeSelectedFile.style.display = 'block';
-    encodeSelectedFile.textContent = '';
-    encodeLinkSection.style.display = 'none';
-    encodeProgressSection.style.display = 'none';
-    encodeResultsSection.style.display = 'none';
-    encodeFileInput.value = '';
-
-    // Reset progress bar
-    encodeProgressFill.style.width = '0%';
-    encodeProgressText.textContent = 'Preparing...';
-
-    // Clear gallery
-    galleryGrid.innerHTML = '';
-    pngCount.textContent = '0';
-
-    // Clear state variables
-    currentEncodeFile = null;
-    currentFileId = null;
-    currentDownloadToken = null;
-    currentSessionId = null;
-
-    // Clear URL parameters
-    window.history.replaceState({}, document.title, window.location.pathname);
-}
-
-// ==================== DECODE TAB ====================
-
-const decodeUploadBox = document.getElementById('decode-upload-box');
-const decodeFileInput = document.getElementById('decode-file-input');
-const decodeSelectedFile = document.getElementById('decode-selected-file');
-const decodeProgressSection = document.getElementById('decode-progress-section');
-const decodeProgressFill = document.getElementById('decode-progress-fill');
-const decodeProgressText = document.getElementById('decode-progress-text');
-const decodeResultsSection = document.getElementById('decode-results-section');
-const decodeErrorSection = document.getElementById('decode-error-section');
-const downloadOriginalBtn = document.getElementById('download-original-btn');
-const decodeNewBtn = document.getElementById('decode-new-btn');
-const retryDecodeBtn = document.getElementById('retry-decode-btn');
-const originalFilename = document.getElementById('original-filename');
-const errorMessage = document.getElementById('error-message');
-
-// Password modal
-const passwordModal = document.getElementById('password-modal');
-const decodePassword = document.getElementById('decode-password');
-const passwordSubmitBtn = document.getElementById('password-submit-btn');
-const passwordCancelBtn = document.getElementById('password-cancel-btn');
-
-let currentDecodeFiles = null;
-let currentDecodeToken = null;
-let passwordSalt = null;
-let passwordIV = null;
-
-// Click to upload
-decodeUploadBox.addEventListener('click', () => {
-    decodeFileInput.click();
-});
-
-// File selection
-decodeFileInput.addEventListener('change', (e) => {
-    debugLog(`Decode file input changed, files count: ${e.target.files.length}`, 'info');
-    if (e.target.files.length > 0) {
-        currentDecodeFiles = e.target.files;
-        const fileCount = currentDecodeFiles.length;
-        const isZip = fileCount === 1 && currentDecodeFiles[0].name.endsWith('.zip');
-
-        if (isZip) {
-            debugLog(`ZIP file selected: ${currentDecodeFiles[0].name}`, 'info');
-            decodeSelectedFile.textContent = `Selected: ${currentDecodeFiles[0].name}`;
-        } else {
-            debugLog(`${fileCount} PNG files selected`, 'info');
-            decodeSelectedFile.textContent = `Selected: ${fileCount} PNG file(s)`;
-        }
-
-        debugLog('Calling uploadAndDecodeFiles()', 'info');
-        uploadAndDecodeFiles();
-    } else {
-        debugLog('No decode files selected', 'error');
-    }
-});
-
-// Drag and drop
-decodeUploadBox.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    decodeUploadBox.classList.add('drag-over');
-});
-
-decodeUploadBox.addEventListener('dragleave', () => {
-    decodeUploadBox.classList.remove('drag-over');
-});
-
-decodeUploadBox.addEventListener('drop', (e) => {
-    e.preventDefault();
-    decodeUploadBox.classList.remove('drag-over');
-
-    if (e.dataTransfer.files.length > 0) {
-        currentDecodeFiles = e.dataTransfer.files;
-        const fileCount = currentDecodeFiles.length;
-        const isZip = fileCount === 1 && currentDecodeFiles[0].name.endsWith('.zip');
-
-        if (isZip) {
-            decodeSelectedFile.textContent = `Selected: ${currentDecodeFiles[0].name}`;
-        } else {
-            decodeSelectedFile.textContent = `Selected: ${fileCount} PNG file(s)`;
-        }
-
-        uploadAndDecodeFiles();
-    }
-});
-
-// Upload and decode files
-function uploadAndDecodeFiles() {
-    debugLog('=== DECODE UPLOAD STARTED ===', 'success');
-    debugLog(`Number of files: ${currentDecodeFiles.length}`, 'info');
-
-    // Hide upload box, show progress
-    decodeUploadBox.style.display = 'none';
-    decodeSelectedFile.style.display = 'none';
-    decodeProgressSection.style.display = 'block';
-    decodeResultsSection.style.display = 'none';
-    decodeErrorSection.style.display = 'none';
-
-    const formData = new FormData();
-
-    try {
-        for (let i = 0; i < currentDecodeFiles.length; i++) {
-            formData.append('files', currentDecodeFiles[i]);
-            debugLog(`Added file ${i + 1}: ${currentDecodeFiles[i].name} (${formatFileSize(currentDecodeFiles[i].size)})`, 'info');
-        }
-        debugLog('FormData created successfully', 'info');
-    } catch (err) {
-        debugLog(`ERROR creating FormData: ${err.message}`, 'error');
-        alert('Error preparing files for upload. Please try again.');
-        resetDecodeTab();
-        return;
-    }
-
-    const xhr = new XMLHttpRequest();
-    debugLog('XMLHttpRequest created for decode', 'info');
-
-    // Set timeout to 2 hours (matches server timeout)
-    xhr.timeout = 2 * 60 * 60 * 1000;
-    debugLog('XHR timeout set to 2 hours', 'info');
-
-    // Safari upload progress workaround for decode
-    let uploadStartTime = Date.now();
-    let progressCheckInterval = null;
-    let lastProgressEvent = false;
-    let safariProgressCounter = 0;
-
-    // Track upload progress
-    xhr.upload.addEventListener('progress', (e) => {
-        lastProgressEvent = true;
-        clearInterval(progressCheckInterval);
-
-        if (e.lengthComputable) {
-            const percentComplete = (e.loaded / e.total) * 100;
-            decodeProgressFill.style.width = `${percentComplete}%`;
-            decodeProgressText.textContent = `Uploading... ${Math.round(percentComplete)}%`;
-            if (percentComplete % 10 === 0 || percentComplete === 100) {
-                debugLog(`Decode upload progress: ${Math.round(percentComplete)}%`, 'info');
-            }
-        } else {
-            debugLog('Decode upload progress: lengthComputable is false', 'error');
-        }
-    });
-
-    // Workaround for Safari not firing progress events
-    xhr.upload.addEventListener('loadstart', () => {
-        debugLog('Decode upload.loadstart fired - starting Safari progress workaround', 'info');
-
-        progressCheckInterval = setInterval(() => {
-            if (!lastProgressEvent) {
-                safariProgressCounter++;
-                const elapsed = Math.floor((Date.now() - uploadStartTime) / 1000);
-
-                decodeProgressText.textContent = `Uploading... (${elapsed}s elapsed, Safari progress mode)`;
-                const estimatedProgress = Math.min(95, (elapsed / 60) * 100);
-                decodeProgressFill.style.width = `${estimatedProgress}%`;
-
-                const readyStateNames = ['UNSENT', 'OPENED', 'HEADERS_RECEIVED', 'LOADING', 'DONE'];
-                const stateName = readyStateNames[xhr.readyState] || 'UNKNOWN';
-
-                if (safariProgressCounter % 5 === 0) {
-                    debugLog(`Decode upload in progress... ${elapsed}s elapsed, XHR state: ${stateName}`, 'info');
-                }
-            }
-        }, 2000);
-    });
-
-    // Handle upload completion
-    xhr.addEventListener('load', () => {
-        clearInterval(progressCheckInterval);
-        debugLog(`Decode XHR load event fired. Status: ${xhr.status}`, 'info');
-
-        if (xhr.status === 200) {
-            debugLog('Decode upload successful!', 'success');
             const response = JSON.parse(xhr.responseText);
-            const sessionId = response.sessionId;
-            debugLog(`Decode session ID: ${sessionId}`, 'info');
-
-            // Start polling for processing progress
-            decodeProgressText.textContent = 'Upload complete! Processing...';
-            decodeProgressFill.style.width = '100%';
-            debugLog('Starting decode progress polling', 'info');
-            pollProgress(sessionId, 'decode');
-        } else {
-            debugLog(`Decode upload error! Status: ${xhr.status} ${xhr.statusText}`, 'error');
-            debugLog(`Response: ${xhr.responseText}`, 'error');
-            alert('Error uploading files. Please try again.');
-            resetDecodeTab();
+            if (!response || typeof response.sessionId !== 'string' || !response.sessionId || response.sessionId.length > 200) throw new Error('Invalid session');
+            job.session = response.sessionId;
+            if (mode === 'encode') showReturnLink(response.sessionId);
+            setProgress(mode, mode === 'encode' ? 'Upload complete. Creating PNG images…' : 'Upload complete. Checking images…', null);
+            poll(mode, generation);
+        } catch {
+            showError(mode, 'The upload response couldn’t be read. The server may have received it. You can try again, but that may create a second temporary job.');
         }
     });
+    xhr.addEventListener('error', () => { if (current()) showError(mode, 'The connection was interrupted. Your selection is still here. Check your connection before trying again; the server may have received part of the upload.'); });
+    xhr.addEventListener('timeout', () => { if (current()) showError(mode, 'The upload timed out. Try a smaller file or a faster connection. Your selection is still here.'); });
+    xhr.addEventListener('abort', () => { if (current()) showError(mode, 'The upload was interrupted. Your selection is still here.'); });
+    xhr.open('POST', `${BASE_PATH}api/${endpoint}`, true);
+    try { xhr.send(form); }
+    catch { if (current()) showError(mode, 'The upload couldn’t start. Check your connection and try again.'); }
+}
 
-    xhr.addEventListener('error', (e) => {
-        clearInterval(progressCheckInterval);
-        debugLog('Decode XHR error event fired', 'error');
-        debugLog(`ReadyState: ${xhr.readyState}, Status: ${xhr.status}`, 'error');
-        alert('Network error during upload. Please check your connection and try again.');
-        resetDecodeTab();
-    });
-
-    xhr.addEventListener('timeout', () => {
-        clearInterval(progressCheckInterval);
-        debugLog('Decode XHR timeout event fired', 'error');
-        alert('Upload timed out. Files may be too large or your connection too slow. Please try again.');
-        resetDecodeTab();
-    });
-
-    xhr.addEventListener('loadstart', () => {
-        debugLog('Decode XHR loadstart event fired', 'info');
-    });
-
-    xhr.addEventListener('loadend', () => {
-        clearInterval(progressCheckInterval);
-        const elapsed = Math.floor((Date.now() - uploadStartTime) / 1000);
-        debugLog(`Decode XHR loadend event fired after ${elapsed}s`, 'info');
-    });
-
-    const url = `${BASE_PATH}api/decode`;
-    debugLog(`Opening decode XHR POST to: ${url}`, 'info');
-    xhr.open('POST', url, true);
-    debugLog('Sending decode FormData...', 'info');
-
+async function poll(mode, generation) {
+    const job = jobs[mode];
+    if (generation !== job.generation) return;
+    const controller = new AbortController();
+    job.controller = controller;
+    const timeout = setTimeout(() => controller.abort(), 30000);
     try {
-        xhr.send(formData);
-        debugLog('Decode xhr.send() called successfully', 'success');
-    } catch (err) {
-        debugLog(`Error calling decode xhr.send(): ${err.message}`, 'error');
+        const response = await fetch(`${BASE_PATH}api/progress/${encodeURIComponent(job.session)}`, { signal: controller.signal, cache: 'no-store' });
+        if (generation !== job.generation) return;
+        if (response.status === 404) {
+            job.session = null;
+            if (mode === 'encode') { $('encode-return').hidden = true; clearSessionUrl(); }
+            showError(mode, 'This job is no longer available. It may have expired or the server may have restarted. If you kept the PNGs, try Recover a file; otherwise choose the original file again.');
+            return;
+        }
+        if (!response.ok) throw new Error('Status unavailable');
+        const data = await response.json();
+        if (generation !== job.generation) return;
+        const stages = { starting: 'Starting…', splitting: 'Preparing the file…', encrypting: 'Protecting your file…', generating: 'Creating PNG images…', zipping: 'Packing your ZIP bundle…', reading: 'Reading your images…', decrypting: 'Recovering your file…' };
+        if (data.stage === 'complete') {
+            await finish(mode, data, generation);
+        } else if (data.stage === 'password_required' && mode === 'decode') {
+            job.busy = false;
+            job.salt = data.salt;
+            setDisabled(mode, false);
+            if (typeof job.salt !== 'string' || !job.salt) { showError(mode, 'The server couldn’t prepare the password check. Choose the original images and try again.'); return; }
+            showPassword();
+        } else if (data.stage === 'incomplete') {
+            const total = Number.isSafeInteger(data.totalCount) && data.totalCount > 0 ? data.totalCount : 'the';
+            const missing = Number.isSafeInteger(data.missingCount) && data.missingCount > 0 ? `${data.missingCount} image${data.missingCount === 1 ? ' is' : 's are'} missing. ` : 'Some images are missing. ';
+            showError(mode, `${missing}Choose all ${total} PNGs together, or the original ZIP bundle.`);
+        } else if (data.stage === 'error') {
+            if (mode === 'decode' && job.salt && /Incorrect password/i.test(data.error || '')) showPassword(publicError(data.error));
+            else showError(mode, publicError(data.error));
+        } else if (Object.hasOwn(stages, data.stage)) {
+            const percent = Number.isFinite(data.progress) ? data.progress : null;
+            setProgress(mode, stages[data.stage], percent);
+            // Schedule only AFTER this request completes; never overlap polls.
+            job.timer = setTimeout(() => poll(mode, generation), 750);
+        } else throw new Error('Unrecognized status');
+    } catch {
+        if (generation === job.generation) showError(mode, 'We couldn’t check this job. It may still be running. Check your connection, then check its status again without uploading a second copy.', { statusRetry: true });
+    } finally {
+        clearTimeout(timeout);
+        if (generation === job.generation) job.controller = null;
     }
 }
 
-// Show decode results
-function showDecodeResults(progress) {
-    currentDecodeToken = progress.downloadToken;
-
-    decodeProgressSection.style.display = 'none';
-    decodeResultsSection.style.display = 'block';
-
-    originalFilename.textContent = `Original file: ${progress.originalFilename}`;
+function showPassword(message = '') {
+    jobs.decode.busy = false;
+    setDisabled('decode', false);
+    resetPassword('decode-password');
+    $('password-error').textContent = message;
+    $('password-error').hidden = !message;
+    showView('decode', 'password');
+    if (activeMode === 'decode') $('decode-password').focus({ preventScroll: true });
 }
-
-// Show decode error
-function showDecodeError(progress) {
-    decodeProgressSection.style.display = 'none';
-    decodeErrorSection.style.display = 'block';
-
-    errorMessage.textContent = `Missing ${progress.missingCount} out of ${progress.totalCount} images. Please upload all ${progress.totalCount} PNG files to reconstruct the original file.`;
-}
-
-// Download original
-downloadOriginalBtn.addEventListener('click', () => {
-    window.location.href = `${BASE_PATH}api/download/${currentDecodeToken}`;
-});
-
-// Decode new file
-decodeNewBtn.addEventListener('click', () => {
-    resetDecodeTab();
-});
-
-// Retry decode
-retryDecodeBtn.addEventListener('click', () => {
-    resetDecodeTab();
-});
-
-function resetDecodeTab() {
-    decodeUploadBox.style.display = 'block';
-    decodeSelectedFile.style.display = 'block';
-    decodeSelectedFile.textContent = '';
-    decodeProgressSection.style.display = 'none';
-    decodeResultsSection.style.display = 'none';
-    decodeErrorSection.style.display = 'none';
-    decodeFileInput.value = '';
-
-    // Reset progress bar
-    decodeProgressFill.style.width = '0%';
-    decodeProgressText.textContent = 'Preparing...';
-
-    // Clear filename display
-    originalFilename.textContent = '';
-
-    // Clear state variables
-    currentDecodeFiles = null;
-    currentDecodeToken = null;
-}
-
-// ==================== PASSWORD MODAL ====================
-
-function showPasswordModal() {
-    debugLog('Showing password modal', 'info');
-    passwordModal.style.display = 'flex';
-    decodePassword.value = '';
-    decodePassword.focus();
-}
-
-function hidePasswordModal() {
-    passwordModal.style.display = 'none';
-    decodePassword.value = '';
-}
-
-// Password submit
-passwordSubmitBtn.addEventListener('click', async () => {
-    const password = decodePassword.value.trim();
-
-    if (!password) {
-        alert('Please enter a password');
+$('password-form').addEventListener('submit', event => {
+    event.preventDefault();
+    if (!$('decode-password').value.trim()) {
+        $('password-error').textContent = 'Enter the file password to continue.';
+        $('password-error').hidden = false;
+        $('decode-password').focus();
         return;
     }
+    start('decode', true);
+});
+$('password-back').addEventListener('click', () => {
+    stopJob('decode');
+    resetPassword('decode-password');
+    $('password-error').hidden = true;
+    clearError('decode');
+    showView('decode', 'review', true);
+});
+$('password-panel').addEventListener('keydown', event => {
+    if (event.key === 'Escape') { event.preventDefault(); $('password-back').click(); }
+});
 
-    debugLog('Password entered, deriving key...', 'info');
-    hidePasswordModal();
-
-    // Show progress
-    decodeProgressSection.style.display = 'block';
-    decodeProgressText.textContent = 'Deriving encryption key from password...';
-    decodeProgressFill.style.width = '10%';
-
+function showReturnLink(session) {
+    const url = new URL(BASE_PATH, window.location.origin);
+    url.searchParams.set('session', session);
+    $('return-url').value = url.href;
+    $('encode-return').hidden = false;
+    const current = new URL(window.location.href);
+    current.searchParams.set('session', session);
+    window.history.replaceState(null, '', current);
+}
+$('copy-link').addEventListener('click', async () => {
+    const generation = copyGeneration;
+    const value = $('return-url').value;
     try {
-        // Need to get salt and IV from first PNG
-        const firstFileReader = new FileReader();
-        firstFileReader.onload = async (e) => {
-            // For now, we'll get salt/IV from the server response
-            // The server already has it in the database
-            await uploadAndDecodeWithPassword(password);
-        };
-
-        if (currentDecodeFiles[0] instanceof File) {
-            firstFileReader.readAsArrayBuffer(currentDecodeFiles[0]);
-        } else {
-            await uploadAndDecodeWithPassword(password);
-        }
-    } catch (err) {
-        debugLog(`Error deriving key: ${err.message}`, 'error');
-        alert('Error deriving encryption key. Please try again.');
-        resetDecodeTab();
+        await navigator.clipboard.writeText(value);
+        if (generation === copyGeneration) $('copy-status').textContent = 'Link copied. Keep it private.';
+    } catch {
+        if (generation !== copyGeneration) return;
+        $('return-url').focus();
+        $('return-url').select();
+        $('copy-status').textContent = 'Copy didn’t work here. Select and copy the link above.';
     }
 });
 
-// Password cancel
-passwordCancelBtn.addEventListener('click', () => {
-    debugLog('Password entry cancelled', 'info');
-    hidePasswordModal();
-    resetDecodeTab();
-});
-
-// Allow Enter key to submit password
-decodePassword.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') {
-        passwordSubmitBtn.click();
-    }
-});
-
-// Upload and decode with password
-async function uploadAndDecodeWithPassword(password) {
-    debugLog('=== DECODE WITH PASSWORD ===', 'success');
-    debugLog('Deriving key from password...', 'info');
-
-    try {
-        // We need to get the salt from the database
-        // For simplicity, we'll derive a key and send it to the server
-        // The server will use it to decrypt the Kyber secret key
-        // First, we need to read one PNG to get the file ID and fetch metadata
-
-        // Read first PNG to get file info
-        const firstPngFile = currentDecodeFiles[0];
-        const arrayBuffer = await firstPngFile.arrayBuffer();
-
-        // Send a request to get the file metadata with salt/IV
-        // For now, we'll use a placeholder salt (server has the real one)
-        // Actually, we need a different approach - let's send the password-derived key to server
-
-        // Generate a deterministic salt from the PNG data (first 32 bytes of file ID hash)
-        // Actually, server stores the salt, so we need to fetch it first
-        // Let's use a simplified approach: fetch file metadata first
-
-        // Note: We need to use the SAME salt that was used during encryption
-        // The server will fetch the salt from the database and use it to decrypt
-        // So we derive the key with the original salt (stored in DB)
-        // For simplicity, server handles the salt lookup
-
-        // Actually, we need to derive with the correct salt
-        // Let's fetch it from server first by uploading one PNG temporarily
-        // Or better: just send the password-derived key using the stored salt
-
-        // Simpler approach: We send the password to server (NO - violates requirement)
-        // Better: Upload files first, server tells us the salt, we derive key, re-upload with key
-
-        // Best approach: Derive key on client using salt from first PNG upload
-        // But that requires round-trip. Let's use a hybrid approach:
-        // Client derives key with a KNOWN salt derivation from password itself
-
-        // Actually, rethinking: salt should be the same for encode/decode
-        // Client sends salt during encode, stores in DB
-        // Client must use SAME salt during decode
-        // So client must fetch salt first from server
-
-        // Simplified: Just upload files and password-based key
-        // Server has the salt and will re-derive properly
-
-        // Upload files and send derived key based on salt from server
-        const formData = new FormData();
-
-        for (let i = 0; i < currentDecodeFiles.length; i++) {
-            formData.append('files', currentDecodeFiles[i]);
-        }
-
-        // We'll send a password-derived key
-        // Server will re-derive using the stored salt and compare
-        // Or better: server sends us the salt, we derive, send back derived key
-
-        // For now: use password as-is to derive key (server re-derives with stored salt)
-        // This requires server to accept password (violates no-plaintext rule)
-
-        // Correct approach: Fetch salt from server first
-        // Let me implement a two-step process
-        decodeProgressText.textContent = 'Fetching encryption parameters...';
-
-        // We'll just append password to form and let server handle derivation
-        // NO - violates security requirement
-
-        // Final approach: Upload once, server checks password protection, returns salt
-        // Client derives key with salt, re-uploads with derived key
-        // For MVP: send password (we'll improve this later)
-
-        // Actually let's just do it right: derive key with same salt from encoding
-        // The salt was sent during encoding and stored in DB
-        // We can derive the key using that same salt
-        // Server will use the salt from DB to decrypt
-
-        // Since server has salt and will use it, we just need to derive with same salt
-        // But client doesn't know the salt yet!
-        // Solution: Encode salt in PNG metadata or fetch from server
-
-        // Quick solution: Fetch file metadata from server to get salt
-        // This requires knowing file ID, which we can get from PNG
-
-        // For now, use a deterministic salt from password for testing
-        // Server will re-derive using stored salt (won't match - need to fix)
-
-        // Let me use the proper solution: fetch salt from server
-        // Server endpoint added above returns salt for password-protected files
-
-        // Use the salt from server (stored during encoding)
-        if (!passwordSalt) {
-            throw new Error('Salt not available from server');
-        }
-
-        const saltArray = base64ToArray(passwordSalt);
-
-        debugLog(`Using salt from server (${saltArray.length} bytes)`, 'info');
-        debugLog('Deriving encryption key with PBKDF2 (this may take a moment)...', 'info');
-        decodeProgressText.textContent = 'Deriving encryption key (this may take 10-30 seconds)...';
-
-        const derivedKey = await deriveKeyFromPassword(password, saltArray);
-
-        // Export the derived key
-        const exportedKey = await window.crypto.subtle.exportKey('raw', derivedKey);
-        const derivedKeyBase64 = arrayToBase64(new Uint8Array(exportedKey));
-
-        formData.append('derivedKey', derivedKeyBase64);
-
-        debugLog('Key derived, uploading files...', 'success');
-        decodeProgressText.textContent = 'Uploading files...';
-        decodeProgressFill.style.width = '20%';
-
-        // Upload with password
-        const xhr = new XMLHttpRequest();
-        xhr.timeout = 2 * 60 * 60 * 1000;
-
-        // Track upload progress
-        xhr.upload.addEventListener('progress', (e) => {
-            if (e.lengthComputable) {
-                const percentComplete = 20 + ((e.loaded / e.total) * 30); // 20-50%
-                decodeProgressFill.style.width = `${percentComplete}%`;
-                decodeProgressText.textContent = `Uploading... ${Math.round(percentComplete - 20)}%`;
+async function finish(mode, data, generation) {
+    const job = jobs[mode];
+    if (typeof data.downloadToken !== 'string' || !data.downloadToken) throw new Error('Missing download');
+    if (mode === 'encode' && (typeof data.fileId !== 'string' || !Number.isSafeInteger(data.pngCount) || data.pngCount < 1)) throw new Error('Missing images');
+    job.busy = false;
+    setDisabled(mode, false);
+    setProgress(mode, 'Complete', 100);
+    if (mode === 'decode') {
+        $('original-filename').textContent = typeof data.originalFilename === 'string' ? data.originalFilename : 'Recovered file';
+        $('download-original').href = `${BASE_PATH}api/download/${encodeURIComponent(data.downloadToken)}`;
+        showView(mode, 'result', true);
+    } else {
+        job.fileId = data.fileId;
+        job.pngCount = data.pngCount;
+        job.shownPngs = 0;
+        $('png-gallery').replaceChildren();
+        $('png-details').open = false;
+        $('download-zip').href = `${BASE_PATH}api/download/${encodeURIComponent(data.downloadToken)}`;
+        $('encode-result-summary').textContent = `${data.pngCount} PNG image${data.pngCount === 1 ? '' : 's'} created. Keep the whole set to recover your file.`;
+        $('png-count').textContent = `(${data.pngCount})`;
+        $('encode-deadline').textContent = 'Recover as soon as possible. Files expire about 1 hour after creation.';
+        job.busy = true;
+        setDisabled(mode, true);
+        setProgress(mode, 'Checking download availability…', null);
+        // A definite 404 means the file was removed even if its in-memory
+        // session still says complete. Network/server failures are advisory.
+        const controller = new AbortController();
+        job.controller = controller;
+        const timeout = setTimeout(() => controller.abort(), 15000);
+        try {
+            const response = await fetch(`${BASE_PATH}api/file/${encodeURIComponent(data.fileId)}`, { signal: controller.signal, cache: 'no-store' });
+            if (generation !== job.generation) return;
+            if (response.status === 404) {
+                job.session = null;
+                job.fileId = null;
+                $('encode-return').hidden = true;
+                $('download-zip').removeAttribute('href');
+                clearSessionUrl();
+                showError(mode, 'This file is no longer available on the server. It may have expired. The saved job can’t provide downloads; choose your original file to create a new set.');
+                return;
             }
-        });
-
-        xhr.addEventListener('load', () => {
-            if (xhr.status === 200) {
-                debugLog('Upload successful, processing...', 'success');
-                const response = JSON.parse(xhr.responseText);
-                const sessionId = response.sessionId;
-
-                decodeProgressText.textContent = 'Processing...';
-                decodeProgressFill.style.width = '50%';
-                pollProgress(sessionId, 'decode');
-            } else {
-                debugLog(`Upload error: ${xhr.status}`, 'error');
-                alert('Error uploading files. Please try again.');
-                resetDecodeTab();
+            const metadata = response.ok ? await response.json() : null;
+            if (generation !== job.generation) return;
+            if (metadata && Number.isFinite(metadata.expiresAt)) {
+                const date = new Date(metadata.expiresAt);
+                if (!Number.isNaN(date.getTime())) $('encode-deadline').textContent = `${date.getTime() <= Date.now() ? 'Recovery deadline has passed: ' : 'Recover before '}${date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })} (your local time).`;
             }
-        });
-
-        xhr.addEventListener('error', () => {
-            debugLog('Upload network error', 'error');
-            alert('Network error. Please try again.');
-            resetDecodeTab();
-        });
-
-        const url = `${BASE_PATH}api/decode-with-password`;
-        xhr.open('POST', url, true);
-        xhr.send(formData);
-
-    } catch (err) {
-        debugLog(`Error: ${err.message}`, 'error');
-        alert(`Error: ${err.message}`);
-        resetDecodeTab();
+        } catch { /* Keep the conservative default expiry guidance. */ }
+        finally { clearTimeout(timeout); }
+        if (generation !== job.generation) return;
+        job.busy = false;
+        resetPassword('encode-password');
+        setDisabled(mode, false);
+        showView(mode, 'result', true);
     }
+    debugLog(mode === 'encode' ? 'Hide: PNG bundle ready.' : 'Recover: file ready.');
 }
 
-// ==================== UTILITIES ====================
-
-function formatFileSize(bytes) {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+function addPngs() {
+    const job = jobs.encode;
+    if (!job.fileId || job.view !== 'result') return;
+    const end = Math.min(job.shownPngs + 12, job.pngCount);
+    for (let index = job.shownPngs; index < end; index++) {
+        const card = document.createElement('div');
+        card.className = 'png-item';
+        const url = `${BASE_PATH}api/png/${encodeURIComponent(job.fileId)}/${index}`;
+        const image = document.createElement('img');
+        image.loading = 'lazy';
+        image.src = url;
+        image.alt = `Encrypted PNG ${index + 1} of ${job.pngCount}`;
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `inplainsight-${index + 1}.png`;
+        link.textContent = `Download PNG ${index + 1}`;
+        card.append(image, link);
+        $('png-gallery').appendChild(card);
+    }
+    job.shownPngs = end;
+    $('more-pngs').hidden = end >= job.pngCount;
+    $('more-pngs').textContent = `Show more images (${end} of ${job.pngCount})`;
 }
+$('png-details').addEventListener('toggle', () => { if ($('png-details').open && !jobs.encode.shownPngs) addPngs(); });
+$('more-pngs').addEventListener('click', addPngs);
 
-// ==================== SESSION RESUMPTION ====================
-
-// Check for session parameter in URL on page load
-window.addEventListener('DOMContentLoaded', () => {
-    const urlParams = new URLSearchParams(window.location.search);
-    const sessionId = urlParams.get('session');
-
-    if (sessionId) {
-        // Resume session
-        currentSessionId = sessionId;
-
-        // Show shareable link
-        const shareUrl = `${window.location.origin}${BASE_PATH}?session=${sessionId}`;
-        shareableLink.value = shareUrl;
-        encodeLinkSection.style.display = 'block';
-
-        // Hide upload box
-        encodeUploadBox.style.display = 'none';
-        encodeSelectedFile.style.display = 'none';
-
-        // Show progress section
-        encodeProgressSection.style.display = 'block';
-        encodeProgressText.textContent = 'Checking status...';
-
-        // Start polling
-        pollProgress(sessionId, 'encode');
+window.addEventListener('beforeunload', event => {
+    if (modes.some(mode => jobs[mode].busy && (mode === 'decode' || !jobs[mode].session))) {
+        event.preventDefault();
+        event.returnValue = '';
     }
 });
+window.addEventListener('pagehide', () => { modes.forEach(stopJob); });
+window.addEventListener('pageshow', event => {
+    if (!event.persisted) return;
+    modes.forEach(mode => {
+        const job = jobs[mode];
+        if (job.view === 'progress' && job.session) {
+            job.busy = true;
+            setDisabled(mode, true);
+            poll(mode, job.generation);
+        } else if (job.view === 'progress') showError(mode, 'The upload was interrupted when you left this page. Choose your file and try again.');
+    });
+});
 
+switchMode(window.location.hash === '#recover' ? 'decode' : 'encode', false);
+const session = new URLSearchParams(window.location.search).get('session');
+if (session) {
+    if (session.length > 200) { clearSessionUrl(); showError('encode', 'This return link is invalid. Choose the original file again.'); }
+    else {
+        jobs.encode.session = session;
+        jobs.encode.busy = true;
+        setDisabled('encode', true);
+        showReturnLink(session);
+        showView('encode', 'progress');
+        setProgress('encode', 'Checking your saved job…', null);
+        poll('encode', jobs.encode.generation);
+    }
+}
+debugLog('Workspace ready. Activity details stay on this page.');

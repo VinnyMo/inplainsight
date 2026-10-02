@@ -13,8 +13,10 @@ Post-quantum steganographic file encryption service that converts files into enc
 
 ## How It Works
 
-1. **Encode**: Upload any file → Split into 3MB chunks → Encrypt with Kyber → Encode into PNGs
-2. **Decode**: Upload PNGs (or ZIP) → Decrypt → Reconstruct original file
+1. **Hide a file**: Choose a file → Review optional password and image size → Create PNGs → Download the complete ZIP bundle
+2. **Recover a file**: Choose the ZIP or all PNGs → Recover (enter a password if needed) → Download the original file
+
+Files expire after about one hour. Recovery requires this server’s retained file record and key, even after you download the images. Keep the original file. See [the guided workflow notes](docs/ux-overhaul.md) for behavior, privacy wording and verification.
 
 ## Installation
 
@@ -137,7 +139,7 @@ inplainsight/
 ├── client/
 │   ├── index.html          # Frontend UI
 │   ├── styles.css          # Styling
-│   └── app.js              # Frontend logic
+│   └── app-v2.js           # Served frontend logic
 ├── database/
 │   ├── schema.sql          # Database schema
 │   ├── db.js               # Database initialization
