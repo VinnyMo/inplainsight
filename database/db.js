@@ -30,8 +30,8 @@ const statements = {
     `),
 
     insertEncryptionKey: db.prepare(`
-        INSERT INTO encryption_keys (file_id, public_key, secret_key, created_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO encryption_keys (file_id, public_key, secret_key, created_at, password_protected, salt, iv, encrypted_secret_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `),
 
     insertDownloadToken: db.prepare(`

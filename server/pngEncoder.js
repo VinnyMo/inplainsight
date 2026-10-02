@@ -25,11 +25,11 @@ const MAGIC_NUMBER = Buffer.from('INPS', 'ascii');
 /**
  * Encode data and metadata into a PNG
  * @param {Buffer} data - The encrypted data to encode
- * @param {Object} metadata - { fileId, chunkIndex, totalChunks, totalPngs }
+ * @param {Object} metadata - { fileId, chunkIndex, totalChunks, totalPngs, passwordProtection }
  * @returns {Promise<Buffer>} PNG image buffer
  */
 async function encodeToPNG(data, metadata) {
-    const { fileId, chunkIndex, totalChunks, totalPngs } = metadata;
+    const { fileId, chunkIndex, totalChunks, totalPngs, passwordProtection } = metadata;
 
     // Calculate image dimensions
     // Total pixels = metadata + data + 1 transparent pixel
@@ -63,6 +63,13 @@ async function encodeToPNG(data, metadata) {
 
     // Data length
     metadataBuffer.writeUInt32BE(data.length, 20);
+
+    // Password protected flag (byte 24)
+    if (passwordProtection && passwordProtection.enabled) {
+        metadataBuffer[24] = 1;
+    } else {
+        metadataBuffer[24] = 0;
+    }
 
     // Write metadata to image
     for (let i = 0; i < METADATA_PIXELS; i++) {
@@ -151,6 +158,7 @@ async function decodeFromPNG(pngBuffer) {
     const totalChunks = metadataBuffer.readUInt32BE(12);
     const totalPngs = metadataBuffer.readUInt32BE(16);
     const dataLength = metadataBuffer.readUInt32BE(20);
+    const passwordProtected = metadataBuffer[24] === 1;
 
     // Extract data pixels
     const data = Buffer.alloc(dataLength);
@@ -166,7 +174,8 @@ async function decodeFromPNG(pngBuffer) {
             chunkIndex,
             totalChunks,
             totalPngs,
-            dataLength
+            dataLength,
+            passwordProtected
         }
     };
 }

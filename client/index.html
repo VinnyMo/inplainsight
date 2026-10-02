@@ -4,15 +4,24 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>InPlainSight - Steganographic File Encryption</title>
-    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="styles.css?v=13">
 </head>
 <body>
     <div class="container">
         <header>
             <h1>InPlainSight</h1>
             <p class="subtitle">Post-Quantum Steganographic File Encryption</p>
-            <p class="warning">⚠️ All files are automatically deleted after 1 hour</p>
+            <p class="warning">⚠️ All files are automatically deleted from the server after 1 hour</p>
         </header>
+
+        <!-- Debug Console -->
+        <div id="debug-console" class="debug-console">
+            <div class="debug-header">
+                <strong>Debug Log</strong>
+                <button id="clear-debug" class="debug-clear">Clear</button>
+            </div>
+            <div id="debug-output" class="debug-output"></div>
+        </div>
 
         <div class="tabs">
             <button class="tab-button active" data-tab="encode">Encode File</button>
@@ -21,9 +30,28 @@
 
         <!-- ENCODE TAB -->
         <div id="encode-tab" class="tab-content active">
+            <div class="settings-section">
+                <label for="png-size-slider" class="settings-label">
+                    Target PNG Size: <span id="png-size-value">10</span> MB
+                </label>
+                <div class="slider-container">
+                    <div class="slider-track-bg"></div>
+                    <input type="range" id="png-size-slider" min="3" max="20" value="10" step="1">
+                </div>
+                <p class="settings-hint">Larger PNGs = fewer files to download</p>
+
+                <div class="password-section">
+                    <label for="encode-password" class="settings-label">
+                        🔒 Password Protection (Optional)
+                    </label>
+                    <input type="password" id="encode-password" class="password-input" placeholder="Leave empty for no password">
+                    <p class="settings-hint">You may add a password to further protect PNGs in case they are intercepted. REMINDER: All files are are automatically deleted from server after 1 hour and will be unrecoverable even with a password.</p>
+                </div>
+            </div>
+
             <div class="upload-section">
                 <div class="upload-box" id="encode-upload-box">
-                    <input type="file" id="encode-file-input" accept="*/*" hidden>
+                    <input type="file" id="encode-file-input" hidden>
                     <div class="upload-prompt">
                         <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
@@ -35,6 +63,16 @@
                     </div>
                 </div>
                 <p class="selected-file" id="encode-selected-file"></p>
+            </div>
+
+            <div class="link-section" id="encode-link-section" style="display: none;">
+                <h3>Processing Your File</h3>
+                <p>Your file is being encrypted. Save this link to check back within 1 hour:</p>
+                <div class="link-box">
+                    <input type="text" id="shareable-link" readonly>
+                    <button class="btn btn-primary" id="copy-link-btn">Copy Link</button>
+                </div>
+                <p class="link-hint">Processing may take several minutes for large files. You can close this page and return using the link above.</p>
             </div>
 
             <div class="progress-section" id="encode-progress-section" style="display: none;">
@@ -112,8 +150,23 @@
                 </div>
             </div>
         </div>
+
+        <!-- Password Modal for Decode -->
+        <div id="password-modal" class="password-modal" style="display: none;">
+            <div class="password-modal-content">
+                <h2>🔒 Password Required</h2>
+                <p>These PNGs are password-protected. Please enter the password to decrypt:</p>
+                <input type="password" id="decode-password" class="password-input" placeholder="Enter password" autofocus>
+                <div class="password-modal-buttons">
+                    <button class="btn btn-primary" id="password-submit-btn">Decrypt</button>
+                    <button class="btn btn-secondary" id="password-cancel-btn">Cancel</button>
+                </div>
+                <p class="password-modal-hint">Password is never sent to the server - all decryption happens in your browser.</p>
+            </div>
+        </div>
     </div>
 
-    <script src="app-v2.js?v=4"></script>
+    <script src="crypto-utils.js?v=13"></script>
+    <script src="app-v2.js?v=13"></script>
 </body>
 </html>
